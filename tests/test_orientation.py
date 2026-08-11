@@ -1,7 +1,5 @@
 """Executable contracts for bounded prompt-conditioned orientation."""
 
-from __future__ import annotations
-
 import json
 import os
 import tempfile

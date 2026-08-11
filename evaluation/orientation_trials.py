@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Compare Release A selector fixtures with the static-checkpoint baseline."""
 
-from __future__ import annotations
-
 import json
 from pathlib import Path
 

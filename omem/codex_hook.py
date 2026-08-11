@@ -1,7 +1,5 @@
 """Fail-open Codex wire adapter for canonical checkpoints and orientation."""
 
-from __future__ import annotations
-
 import json
 import sys
 import time

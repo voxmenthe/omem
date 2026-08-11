@@ -1,7 +1,5 @@
 """End-to-end command contract tests."""
 
-from __future__ import annotations
-
 import io
 import json
 import os
