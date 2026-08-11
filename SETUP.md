@@ -31,8 +31,10 @@ For an end-to-end Codex installation:
    runs `memory init` and `memory wake`, then use `/hooks` to confirm exactly
    one enabled OMem handler for each configured event.
 
-The hooks supply lightweight turn and compaction reminders; they do not replace
-the startup workflow, decide what becomes durable memory, or run maintenance.
+The prompt hook supplies a canonical checkpoint plus bounded automatic
+orientation when relevant evidence is available; the compaction hook supplies
+the existing recovery checkpoint. Neither replaces the startup workflow,
+decides what becomes durable memory, nor runs maintenance.
 
 ## Choose the OMem working repository
 
@@ -121,10 +123,14 @@ environment:
 uv run --locked python -m unittest discover -s tests -t . -v
 uv run --locked python semantic_eval.py \
   fixtures/semantic-projection-example.json
+uv run --locked python evaluation/orientation_trials.py
+uv run --locked python benchmarks/orientation_latency.py
 ```
 
-The semantic fixture verifies the scoring harness only. Follow
-[`EVALUATION.md`](EVALUATION.md) for the real observation period.
+The semantic fixture verifies the projection scoring harness. The orientation
+trial and latency reports reproduce the controlled Release A outcome gate.
+[`EVALUATION.md`](EVALUATION.md) records that decision and separates it from the
+real-session follow-up.
 
 ## Change dependencies
 
@@ -145,20 +151,37 @@ change.
 The optional integration does not replace startup `memory wake`. It installs
 two read-only handlers in one global user hook source:
 
-- `UserPromptSubmit` adds the marked turn checkpoint as developer context
-  before model work on every user prompt, in every repository;
+- `UserPromptSubmit` adds the marked turn checkpoint and, when the bounded
+  selector finds relevant evidence, zero to three escaped records from existing
+  self and current-repository stores before model work;
 - `SessionStart` matching `compact` adds the marked recovery checkpoint before
   the immediate post-compaction model request, including automatic mid-turn
   continuation.
 
+Prompt orientation is local, deterministic, model-free, and read-only. It does
+not initialize, repair, or mutate stores; create dreams; read transcripts; or
+persist/log the prompt. It has one 500 ms in-process deadline and an 800-byte
+decoded checkpoint-plus-evidence budget. The supported ceiling is 10,000
+complete raw records per scope; an oversized or failing scope abstains without
+suppressing another coherent scope. A no-match or any contained provider
+failure returns the canonical checkpoint alone.
+
+Use `memory orient "<query>"` for the same selection manually. It has a 2-second
+deadline and 4,096-byte evidence budget, but retains the same 10,000-record
+ceiling. `memory recall <scope> <regex>` remains the canonical-history fallback
+above the ceiling. Removing only the `UserPromptSubmit` handler disables
+automatic orientation without changing stored data, the manual command, or the
+compaction handler.
+
 Codex does expose `PreCompact`, but its output contract cannot add developer
 context: plain stdout is ignored and JSON can warn or stop compaction. Blocking
 automatic compaction would be unsafe, so the pre-turn handler is the earliest
-dependable model-visible reminder and tells the agent to write durable deltas as
-soon as they qualify. See the official [Codex hooks
+dependable model-visible checkpoint. It also supplies bounded orientation when
+the current prompt has relevant evidence and tells the agent to write durable
+deltas as soon as they qualify. See the official [Codex hooks
 contract](https://learn.chatgpt.com/docs/hooks#precompact).
 
-First verify the pure adapter directly:
+First verify the fail-open hook adapter directly:
 
 ```sh
 printf '%s\n' \
@@ -172,9 +195,10 @@ printf '%s\n' \
   | memory codex-hook
 ```
 
-The first two commands print compact JSON responses with different canonical
-checkpoints; the third prints nothing. None initializes or opens a memory
-store.
+The first command prints compact JSON containing the turn checkpoint; in an
+initialized store it may also include matching evidence. The second prints the
+unchanged compaction checkpoint, and the third prints nothing. None initializes
+or writes a memory store.
 
 Use `codex doctor --json` from the normal launcher to inspect the effective
 `CODEX_HOME` and config path, then use `/hooks` to inspect the sources Codex
@@ -204,9 +228,10 @@ profile shows one enabled `UserPromptSubmit` handler and one enabled
 Shared definitions and hook trust are separate. Codex keys command trust to the
 effective source path and definition hash, so each existing repo home needs a
 one-time review and a newly created home will prompt once even though it already
-inherits the handlers. Review repo homes sequentially when they write trust
-records into one shared config target; concurrent reviews can overwrite one
-another. A new or changed definition remains skipped until it is reviewed.
+inherits the handlers. The Release A prompt definition has changed and must be
+reviewed again. Review repo homes sequentially when they write trust records
+into one shared config target; concurrent reviews can overwrite one another. A
+new or changed definition remains skipped until it is reviewed.
 
 Validate a fresh session in at least two disposable repositories before relying
 on the integration. Confirm that the first user prompt supplies exactly one
@@ -239,9 +264,11 @@ shows enough value to justify a separate reviewer tool.
 
 ## Uninstall
 
-First remove only the `UserPromptSubmit` and `SessionStart`/`^compact$`
-handlers with command `memory codex-hook` and confirm both are absent through
-`/hooks`. Then remove the globally available command with:
+To disable only automatic orientation, remove the `UserPromptSubmit` handler
+with command `memory codex-hook`; the stored data, manual command, and compact
+recovery handler remain unchanged. For full uninstall, also remove the
+`SessionStart`/`^compact$` handler and confirm both are absent through `/hooks`.
+Then remove the globally available command with:
 
 ```sh
 uv tool uninstall scoped-omem

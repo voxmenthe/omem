@@ -6,9 +6,13 @@ import datetime as dt
 import fcntl
 import os
 import re
+import stat
+import time
 from contextlib import contextmanager
+from dataclasses import dataclass
+from io import BufferedReader
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Generic, Iterator, TypeVar
 
 from .layout import secure_directory, secure_file
 from .models import (
@@ -35,6 +39,42 @@ _PAYLOAD = re.compile(
     r"^\[(?P<kind>[a-z]+)\|(?P<provenance>[a-z]+)\] (?P<text>.*)$"
 )
 _LOG_HEAD = re.compile(r"^#(?P<id>\d+) (?P<date>\d{4}-\d{2}-\d{2}) (?P<body>.*)$")
+
+_Metadata = TypeVar("_Metadata")
+
+
+@dataclass
+class CapturedPrefix(Generic[_Metadata]):
+    """A retained descriptor for one immutable complete-record prefix."""
+
+    record_count: int
+    metadata: _Metadata
+    _handle: BufferedReader
+
+    def chunks(self, max_bytes: int) -> Iterator[bytes]:
+        """Yield the captured prefix without reading a later append."""
+
+        if max_bytes <= 0 or max_bytes % LOG_RECORD_BYTES:
+            raise StoreCorrupt(
+                "raw capture chunk size must be a positive record multiple"
+            )
+        remaining = self.record_count * LOG_RECORD_BYTES
+        while remaining:
+            wanted = min(max_bytes, remaining)
+            data = self._handle.read(wanted)
+            if len(data) != wanted:
+                raise StoreCorrupt("captured raw prefix became shorter while reading")
+            remaining -= wanted
+            yield data
+
+    def close(self) -> None:
+        self._handle.close()
+
+    def __enter__(self) -> CapturedPrefix[_Metadata]:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
 
 def _pad(value: str, width: int) -> bytes:
@@ -165,6 +205,59 @@ class MemoryStore:
             fcntl.flock(lock, fcntl.LOCK_EX)
             yield
 
+    def capture_prefix(
+        self,
+        *,
+        deadline: float,
+        metadata_loader: Callable[[], _Metadata] | None = None,
+        lock_timeout: float = 0.020,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> CapturedPrefix[_Metadata | None]:
+        """Capture a complete raw prefix and metadata under a bounded shared lock."""
+
+        self.require()
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        cloexec = getattr(os, "O_CLOEXEC", 0)
+        lock_fd = os.open(self.lock_path, os.O_RDWR | nofollow | cloexec)
+        raw_handle: BufferedReader | None = None
+        acquired = False
+        try:
+            cutoff = min(deadline, clock() + lock_timeout)
+            while True:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except BlockingIOError:
+                    if clock() >= cutoff:
+                        raise TimeoutError(
+                            f"timed out acquiring the {self.scope} memory lock"
+                        )
+                    time.sleep(0)
+
+            if clock() >= deadline:
+                raise TimeoutError(f"{self.scope} memory capture deadline expired")
+            raw_fd = os.open(self.log_path, os.O_RDONLY | nofollow | cloexec)
+            raw_handle = os.fdopen(raw_fd, "rb")
+            raw_stat = os.fstat(raw_fd)
+            if not stat.S_ISREG(raw_stat.st_mode):
+                raise StoreCorrupt(f"{self.log_path} is not a regular file")
+            record_count = raw_stat.st_size // LOG_RECORD_BYTES
+            metadata = metadata_loader() if metadata_loader is not None else None
+        except Exception:
+            if raw_handle is not None:
+                raw_handle.close()
+            raise
+        finally:
+            if acquired:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+        return CapturedPrefix(
+            record_count=record_count,
+            metadata=metadata,
+            _handle=raw_handle,
+        )
+
     def count(self) -> int:
         self.require()
         size = self.log_path.stat().st_size
@@ -225,7 +318,7 @@ class MemoryStore:
                 total = min(total, limit)
             with self.log_path.open("rb") as handle:
                 data = handle.read(total * LOG_RECORD_BYTES)
-        return self._decode_records(data)
+        return self.decode_records(data)
 
     def slice(self, lo: int, hi: int) -> tuple[Note, ...]:
         self.require()
@@ -234,12 +327,12 @@ class MemoryStore:
         with self.log_path.open("rb") as handle:
             handle.seek(lo * LOG_RECORD_BYTES)
             data = handle.read((hi - lo) * LOG_RECORD_BYTES)
-        records = self._decode_records(data, first_id=lo)
+        records = self.decode_records(data, first_id=lo)
         if len(records) != hi - lo:
             raise StoreCorrupt(f"raw range {lo}-{hi} is outside the log")
         return records
 
-    def _decode_records(
+    def decode_records(
         self, data: bytes, first_id: int = 0
     ) -> tuple[Note, ...]:
         if len(data) % LOG_RECORD_BYTES:

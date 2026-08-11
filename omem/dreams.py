@@ -455,6 +455,18 @@ def validate_current_sources(store: MemoryStore, artifact: DreamArtifact) -> Non
     """Prove that a derived dream still names the canonical raw prefix."""
 
     notes = store.snapshot(limit=artifact.source_count)
+    validate_artifact_sources(artifact, notes)
+
+
+def validate_artifact_sources(
+    artifact: DreamArtifact, notes: tuple[Note, ...]
+) -> None:
+    """Validate a dream against an already captured immutable raw prefix."""
+
+    if artifact.source_count > MAX_DREAM_SOURCE_NOTES:
+        raise DreamError(
+            f"dream checkpoint exceeds the {MAX_DREAM_SOURCE_NOTES}-note source limit"
+        )
     if len(notes) != artifact.source_count:
         raise DreamError(
             f"dream checkpoint {artifact.source_count} exceeds raw log length "

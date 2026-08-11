@@ -1,15 +1,18 @@
 # Scoped Memory MVP
 
-This repository is a standalone, standard-library-only implementation of
-scoped memory for coding agents. It keeps durable personal and repository
-memory separate, treats raw notes as the only canonical data, and makes every
-compressed projection visibly fallible.
+This directory is a standalone, standard-library-only implementation of scoped
+memory for coding agents. It keeps durable personal and repository memory
+separate, treats raw notes as the only canonical data, and makes every
+compressed projection visibly fallible. The current automatic-orientation
+release decision and measurements are recorded in
+[`EVALUATION.md`](EVALUATION.md).
 
 The core tool does **not** run a daemon, call a model, edit agent instructions,
 or write inside a repository. Its optional Codex integration uses one shared
-global user config source with two read-only handlers: a pre-turn reminder and
-a post-compaction recovery checkpoint. Model work and every semantic write
-remain explicit operations performed by the acting primary agent.
+global user config source with two read-only handlers: bounded,
+prompt-conditioned orientation before a turn and a post-compaction recovery
+checkpoint. Model work and every semantic write remain explicit operations
+performed by the acting primary agent.
 
 ## Quick start
 
@@ -37,6 +40,7 @@ instruction block; a checked-in copy is in [`INSTRUCTIONS.md`](INSTRUCTIONS.md).
 ```text
 memory init
 memory wake
+memory orient [--explain] "<query>"
 memory note <scope>:<kind>:<provenance> "<text>"
 memory recall <scope> <regex>
 memory nap [scope]
@@ -95,29 +99,51 @@ Codex native-memory directories, self scope remains available, but OMem refuses
 repo scope, does not initialize or wake an internal repo store, and suppresses
 its hook cues. It never guesses a task repository or migrates an existing store.
 
-`memory codex-hook` is a pure adapter for two Codex command-hook events. On
-`UserPromptSubmit`, it returns the marked pre-turn checkpoint from packaged
-[`INSTRUCTIONS.md`](INSTRUCTIONS.md) as developer context before model work.
-On `SessionStart(source=compact)`, it returns the marked recovery checkpoint
-before the immediate post-compaction model request, including an automatic
-mid-turn continuation. A valid nonmatching event is a silent no-op. Malformed
-input or invalid markers produce a bounded `continue: true` warning, so memory
-cannot interrupt normal Codex flow. The adapter never reads the prompt or
-transcript, opens a memory store, writes state, or calls a model.
+`memory codex-hook` is a concrete adapter for two Codex command-hook events. On
+`UserPromptSubmit`, it always returns the canonical marked pre-turn checkpoint.
+It also passes the prompt and event working directory to the local orientation
+service, which may append zero to three attributable evidence records from the
+existing self and current-repository stores. Every record is escaped JSON data
+under a fixed warning that prior memory is fallible, not an instruction. A
+no-match, unavailable scope, oversized store, timeout, or selector failure
+leaves the checkpoint unchanged.
+
+On `SessionStart(source=compact)`, the adapter returns the marked recovery
+checkpoint before the immediate post-compaction model request, including an
+automatic mid-turn continuation. Compaction behavior is unchanged. A valid
+nonmatching event is a silent no-op. Malformed input or invalid markers produce
+a bounded `continue: true` warning, so memory cannot interrupt normal Codex
+flow.
+
+Automatic orientation is local, deterministic, model-free, and read-only. It
+does not initialize, repair, or mutate a store; generate a dream; read a
+transcript; or persist/log the query. Self and repository scopes fail
+independently. The total in-process prompt budget is 500 ms, and the complete
+checkpoint-plus-evidence payload is at most 800 UTF-8 bytes.
+
+The documented ceiling is 10,000 complete raw records per scope. A scope above
+that ceiling abstains before scanning; another eligible scope can still
+contribute. `memory orient "<query>"` exposes the same selector manually with a
+2-second deadline and a 4,096-byte evidence budget. `--explain` adds source and
+score diagnostics without echoing the query. Manual orientation uses the same
+10,000-record ceiling; use scoped `memory recall` to search canonical history
+above it.
 
 Codex does expose `PreCompact`, but that event cannot add developer context; it
-can only warn or stop compaction. The pre-turn handler therefore supplies the
-model-visible reminder early enough to record durable evidence as it qualifies,
-while the compact `SessionStart` handler remains a fail-soft recovery path.
+can only warn or stop compaction. The prompt handler therefore supplies the
+model-visible checkpoint and bounded orientation before work, while the compact
+`SessionStart` handler remains a fail-soft recovery path.
 
 Install and trust the two handlers in one shared global user config source with
 the [`SETUP.md`](SETUP.md#complete-installation) runbook. The exact tracked
 definitions are in
 [`integrations/codex/hooks.toml`](integrations/codex/hooks.toml). The shared
 source avoids project-local configuration, but Codex command trust is
-path-scoped and must be reviewed once for each effective user home. The hooks
-are activation aids: the acting agent still decides whether supported evidence
-qualifies for a note and runs maintenance through the normal commands.
+path-scoped and must be reviewed once for each effective user home. Removing
+only the `UserPromptSubmit` definition disables automatic orientation without
+changing raw data, manual orientation, or compaction recovery. The acting agent
+still decides whether supported evidence qualifies for a note and runs
+maintenance through the normal commands.
 
 `memory review-sessions` supports a separate manual retrospective experiment.
 It accepts one to five explicitly selected existing files, then prints a
@@ -265,30 +291,33 @@ cd omem
 uv run python -m unittest discover -s tests -t . -v
 uv run python semantic_eval.py \
   fixtures/semantic-projection-example.json
+uv run python evaluation/orientation_trials.py
+uv run python benchmarks/orientation_latency.py
 ```
 
-The unit suite covers metadata boundaries, two repository identities,
-clone/worktree identity, concurrent IDs, torn-tail repair, independent wake
-budgets, per-scope wake degradation, raw-only dreams, citation/range/budget
-validation, malformed/stale/conflicting results, post-checkpoint deltas,
-idempotency, corrections, fallibility labels, scoped recall, permissions,
-removal isolation, fail-open hook behavior, canonical prompt packaging, and
-bounded reviewer input.
+The unit suite covers metadata boundaries, repository identity, concurrency,
+captured-prefix behavior, torn-tail repair, independent scope failure, raw-only
+dreams, citation/range/budget validation, deterministic selection and conflict
+abstention, hostile data escaping, UTF-8 output budgets, fail-open hook behavior,
+exact compaction compatibility, canonical prompt packaging, and bounded
+reviewer input.
 
-The semantic fixture is a reproducible scoring harness, not a fabricated
-observation result. The assessment's 20-session/three-dream observation period
-must be run with real sessions after installation; record each cohort result
-instead of claiming it here.
+The semantic fixture is a reproducible scoring harness. The paired orientation
+trials and representative latency results support the bounded Release A ship
+decision in [`EVALUATION.md`](EVALUATION.md); they are not a substitute for the
+documented real-session follow-up.
 
 ## Removal
 
-1. Remove only the `UserPromptSubmit` and `SessionStart`/`^compact$` handlers
-   whose command is `memory codex-hook`, then confirm through Codex `/hooks`
-   that both are absent.
-2. Remove the block from [`INSTRUCTIONS.md`](INSTRUCTIONS.md) wherever you
+1. To disable only automatic orientation, remove the `UserPromptSubmit` handler
+   whose command is `memory codex-hook`; manual orientation and compaction
+   recovery remain available and no data conversion is needed.
+2. For full removal, also remove the `SessionStart`/`^compact$` handler and
+   confirm through Codex `/hooks` that both handlers are absent.
+3. Remove the block from [`INSTRUCTIONS.md`](INSTRUCTIONS.md) wherever you
    explicitly installed it.
-3. If installed as a UV tool, run `uv tool uninstall scoped-omem`.
-4. Archive data reversibly:
+4. If installed as a UV tool, run `uv tool uninstall scoped-omem`.
+5. Archive data reversibly:
 
    ```sh
    mv ~/.memory-v0 ~/.memory-v0.archived

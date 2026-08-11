@@ -8,11 +8,17 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from .models import MemoryError, RepoIdentity, Scope
+
+
+class _GitDeadlineExpired(Exception):
+    """Internal signal that repository identity could not finish in time."""
+
 
 ROOT_ENV = "MEMORY_V0_DIR"
 CODEX_NATIVE_MEMORY_SCOPE_ERROR = (
@@ -52,15 +58,30 @@ def is_codex_native_memory_path(path: Path) -> bool:
     return False
 
 
-def _git(args: list[str], cwd: Path) -> str | None:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-    )
+def _git(
+    args: list[str],
+    cwd: Path,
+    *,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> str | None:
+    timeout: float | None = None
+    if deadline is not None:
+        timeout = deadline - clock()
+        if timeout <= 0:
+            raise _GitDeadlineExpired
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise _GitDeadlineExpired from error
     if result.returncode != 0:
         return None
     value = result.stdout.strip()
@@ -101,15 +122,35 @@ def _remote_identity(host: str, path: str) -> str:
     return f"{host.lower()}/{clean_path}"
 
 
-def current_repo(cwd: Path | None = None) -> RepoIdentity | None:
+def current_repo(
+    cwd: Path | None = None,
+    *,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> RepoIdentity | None:
     """Resolve a repo to origin identity, falling back to its real root."""
 
-    here = (cwd or Path.cwd()).resolve()
-    root_text = _git(["rev-parse", "--show-toplevel"], here)
-    if root_text is None:
+    if deadline is not None and clock() >= deadline:
         return None
-    repo_root = Path(root_text).resolve()
-    origin = _git(["remote", "get-url", "origin"], repo_root)
+    here = (cwd or Path.cwd()).resolve()
+    try:
+        root_text = _git(
+            ["rev-parse", "--show-toplevel"],
+            here,
+            deadline=deadline,
+            clock=clock,
+        )
+        if root_text is None:
+            return None
+        repo_root = Path(root_text).resolve()
+        origin = _git(
+            ["remote", "get-url", "origin"],
+            repo_root,
+            deadline=deadline,
+            clock=clock,
+        )
+    except _GitDeadlineExpired:
+        return None
     if origin:
         normalized = normalize_origin(origin, repo_root)
         key = f"remote:{normalized}"

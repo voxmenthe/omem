@@ -4,7 +4,7 @@
 type = "command"
 command = "memory codex-hook"
 timeout = 3
-statusMessage = "Loading memory turn checkpoint"
+statusMessage = "Loading memory turn context"
 additionalContextLimit = 800
 
 [[hooks.SessionStart]]

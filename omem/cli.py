@@ -6,10 +6,12 @@ import math
 import os
 import re
 import sys
+import time
 from importlib import resources
 from pathlib import Path
 from typing import Sequence
 
+from .codex_hook import command_codex_hook
 from .dreams import (
     DREAM_DUE_NOTES,
     apply_dream,
@@ -31,6 +33,7 @@ from .layout import (
     scope_path,
 )
 from .models import DreamError, MemoryError, Scope
+from .orientation import OrientationRequest, fetch_orientation
 from .store import POST_DREAM_RAW, MemoryStore
 
 FALLIBILITY_NOTICE = (
@@ -44,6 +47,7 @@ USAGE = """memory - scoped, auditable memory for coding agents
 Usage:
   memory init
   memory wake
+  memory orient [--explain] "<query>"
   memory note <scope>:<kind>:<provenance> "<text>"
   memory recall <scope> <regex>
   memory nap [scope]
@@ -66,6 +70,15 @@ Session workflow:
      history when wake omitted an older detail.
   4. After primary work, run `memory status`; pay due nap or dream maintenance
      before handoff when practical.
+
+Orientation:
+  `memory orient "<query>"` performs a local, deterministic, read-only search
+  over existing self and current-repository stores. It emits zero to three
+  escaped, attributable records under a fallibility warning. `--explain` adds
+  source and score diagnostics without echoing the query. The manual command
+  has a 2-second deadline, a 4,096-byte evidence budget, and the same 10,000
+  complete-record ceiling per scope as automatic orientation. Above that
+  ceiling, use scoped `memory recall` to search canonical raw history.
 
 Choosing note metadata:
   self kinds: fact, preference, episode
@@ -181,54 +194,12 @@ Examples:
   memory recall repo 'canonical|append-only'
 """
 
-_TURN_CHECKPOINT_START = "<!-- BEGIN OMEM TURN CHECKPOINT -->"
-_TURN_CHECKPOINT_END = "<!-- END OMEM TURN CHECKPOINT -->"
-_COMPACTION_CHECKPOINT_START = "<!-- BEGIN OMEM COMPACTION CHECKPOINT -->"
-_COMPACTION_CHECKPOINT_END = "<!-- END OMEM COMPACTION CHECKPOINT -->"
-_MALFORMED_HOOK_WARNING = (
-    "omem codex-hook received malformed input; Codex continues without "
-    "a memory checkpoint."
-)
-_CHECKPOINT_HOOK_WARNING = (
-    "omem codex-hook could not load one canonical checkpoint; Codex continues "
-    "without it."
-)
 _TAG = re.compile(r"^(?P<scope>self|repo):(?P<kind>[a-z]+):(?P<provenance>[a-z]+)$")
 _RANGE = re.compile(r"^(?P<lo>\d+)-(?P<hi>\d+)$")
 
 
 def _read_packaged_text(name: str) -> str:
     return resources.files("omem").joinpath(name).read_text(encoding="utf-8")
-
-
-def _write_hook_json(value: dict[str, object]) -> None:
-    print(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
-
-
-def _hook_warning(message: str) -> int:
-    _write_hook_json({"continue": True, "systemMessage": message})
-    return 0
-
-
-def _extract_checkpoint(
-    instructions: str,
-    start_marker: str,
-    end_marker: str,
-    label: str,
-) -> str:
-    if (
-        instructions.count(start_marker) != 1
-        or instructions.count(end_marker) != 1
-    ):
-        raise ValueError(f"canonical {label} checkpoint markers are not unique")
-    start = instructions.index(start_marker) + len(start_marker)
-    end = instructions.index(end_marker)
-    if start > end:
-        raise ValueError(f"canonical {label} checkpoint markers are out of order")
-    checkpoint = instructions[start:end].strip()
-    if not checkpoint:
-        raise ValueError(f"canonical {label} checkpoint is empty")
-    return checkpoint
 
 
 def _store(scope: Scope) -> MemoryStore:
@@ -356,57 +327,48 @@ def command_init(args: Sequence[str]) -> int:
     return 0
 
 
-def command_codex_hook(args: Sequence[str]) -> int:
-    """Handle a Codex hook event without touching the memory store."""
+def command_orient(args: Sequence[str]) -> int:
+    """Render bounded prompt-conditioned evidence for an explicit query."""
 
-    if args:
-        return _hook_warning(_MALFORMED_HOOK_WARNING)
-    try:
-        event = json.load(sys.stdin)
-    except Exception:
-        # This provider boundary must remain fail-open even if stdin itself
-        # raises, rather than allowing memory integration to interrupt Codex.
-        return _hook_warning(_MALFORMED_HOOK_WARNING)
-    if not isinstance(event, dict):
-        return _hook_warning(_MALFORMED_HOOK_WARNING)
-
-    event_name = event.get("hook_event_name")
-    if not isinstance(event_name, str):
-        return _hook_warning(_MALFORMED_HOOK_WARNING)
-    if event_name == "UserPromptSubmit":
-        markers = (_TURN_CHECKPOINT_START, _TURN_CHECKPOINT_END, "turn")
-    elif event_name == "SessionStart":
-        source = event.get("source")
-        if not isinstance(source, str):
-            return _hook_warning(_MALFORMED_HOOK_WARNING)
-        if source != "compact":
-            return 0
-        markers = (
-            _COMPACTION_CHECKPOINT_START,
-            _COMPACTION_CHECKPOINT_END,
-            "compaction",
+    explain = bool(args and args[0] == "--explain")
+    query_args = args[1:] if explain else args
+    if len(query_args) != 1:
+        raise MemoryError("orient requires one quoted query, optionally after --explain")
+    result = fetch_orientation(
+        OrientationRequest(
+            query=query_args[0],
+            cwd=Path.cwd(),
+            max_evidence_bytes=4096,
+            max_items=3,
+            deadline=time.monotonic() + 2.0,
         )
-    else:
-        return 0
-
-    if is_codex_native_memory_path(Path.cwd()):
-        return 0
-
-    try:
-        checkpoint = _extract_checkpoint(
-            _read_packaged_text("INSTRUCTIONS.md"), *markers
-        )
-    except Exception:
-        # Resource-loader failures are also non-fatal at the hook boundary.
-        return _hook_warning(_CHECKPOINT_HOOK_WARNING)
-    _write_hook_json(
-        {
-            "hookSpecificOutput": {
-                "hookEventName": event_name,
-                "additionalContext": checkpoint,
-            }
-        }
     )
+    if explain:
+        print(
+            json.dumps(
+                {
+                    "abstention_reason": result.abstention_reason,
+                    "evidence_bytes": len(result.rendered.encode("utf-8")),
+                    "items": [
+                        {
+                            "scope": item.scope,
+                            "source": item.source,
+                            "kind": item.kind,
+                            "provenance": item.provenance,
+                            "score": item.score,
+                            "claim": item.claim,
+                        }
+                        for item in result.items
+                    ],
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+    elif result.rendered:
+        print(result.rendered)
+    else:
+        print(f"orientation abstained: {result.abstention_reason}")
     return 0
 
 
@@ -675,6 +637,7 @@ def command_status(args: Sequence[str]) -> int:
 
 COMMANDS = {
     "init": command_init,
+    "orient": command_orient,
     "codex-hook": command_codex_hook,
     "review-sessions": command_review_sessions,
     "wake": command_wake,

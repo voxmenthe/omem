@@ -4,12 +4,15 @@ import unittest
 from importlib import resources
 from importlib.metadata import distribution
 
+from omem import __version__
+
 from .helpers import PROJECT
 
 
 class PackagingTest(unittest.TestCase):
     def test_memory_entry_point_targets_packaged_omem_cli(self) -> None:
         installed = distribution("scoped-omem")
+        self.assertEqual(installed.version, __version__)
         memory_entry_points = [
             entry_point
             for entry_point in installed.entry_points
@@ -22,6 +25,14 @@ class PackagingTest(unittest.TestCase):
         self.assertTrue(callable(memory_entry_points[0].load()))
         self.assertIn(
             "omem/cli.py",
+            {str(path) for path in installed.files or ()},
+        )
+        self.assertIn(
+            "omem/codex_hook.py",
+            {str(path) for path in installed.files or ()},
+        )
+        self.assertIn(
+            "omem/orientation.py",
             {str(path) for path in installed.files or ()},
         )
         self.assertIn(

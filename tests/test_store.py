@@ -1,8 +1,11 @@
 """Fixed-width store, isolation, and identity tests."""
 
+import fcntl
 import multiprocessing
 import os
+import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -93,6 +96,74 @@ class StoreTest(unittest.TestCase):
         with self.assertRaises(StoreCorrupt):
             self.store.recall("[")
 
+    def test_captured_prefix_excludes_a_complete_concurrent_append(self) -> None:
+        self.store.append("fact", "observed", "captured")
+        capture = self.store.capture_prefix(
+            deadline=time.monotonic() + 1,
+            metadata_loader=lambda: "captured metadata",
+        )
+        self.store.append("fact", "observed", "next invocation")
+        with capture:
+            chunks = tuple(capture.chunks(LOG_RECORD_BYTES * 2))
+        self.assertEqual(capture.record_count, 1)
+        self.assertEqual(capture.metadata, "captured metadata")
+        self.assertEqual(
+            [note.text for note in self.store.decode_records(b"".join(chunks))],
+            ["captured"],
+        )
+
+    def test_captured_prefix_keeps_its_inode_after_path_replacement(self) -> None:
+        self.store.append("fact", "observed", "captured inode")
+        capture = self.store.capture_prefix(deadline=time.monotonic() + 1)
+        replacement = self.store.path / "replacement.log"
+        replacement.write_bytes(
+            self.store.log_path.read_bytes().replace(
+                b"captured inode", b"replacement text"
+            )
+        )
+        os.replace(replacement, self.store.log_path)
+        with capture:
+            data = b"".join(capture.chunks(LOG_RECORD_BYTES))
+        notes = self.store.decode_records(data)
+        self.assertEqual([note.text for note in notes], ["captured inode"])
+
+    def test_captured_prefix_ignores_partial_tail_without_repairing(self) -> None:
+        self.store.append("fact", "observed", "complete")
+        with self.store.log_path.open("ab") as handle:
+            handle.write(b"partial")
+        before = self.store.log_path.read_bytes()
+        capture = self.store.capture_prefix(deadline=time.monotonic() + 1)
+        with capture:
+            data = b"".join(capture.chunks(LOG_RECORD_BYTES))
+        self.assertEqual(capture.record_count, 1)
+        self.assertEqual(self.store.log_path.read_bytes(), before)
+        self.assertEqual(
+            [note.text for note in self.store.decode_records(data)],
+            ["complete"],
+        )
+
+    def test_captured_prefix_reports_a_short_retained_inode(self) -> None:
+        self.store.append("fact", "observed", "complete")
+        capture = self.store.capture_prefix(deadline=time.monotonic() + 1)
+        self.store.log_path.write_bytes(b"")
+        with capture, self.assertRaisesRegex(StoreCorrupt, "became shorter"):
+            tuple(capture.chunks(LOG_RECORD_BYTES))
+
+    def test_shared_capture_lock_has_a_deterministic_deadline(self) -> None:
+        lock_fd = os.open(self.store.lock_path, os.O_RDWR)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        ticks = iter((0.0, 0.0, 0.01, 0.02, 0.03))
+        try:
+            with self.assertRaisesRegex(TimeoutError, "timed out acquiring"):
+                self.store.capture_prefix(
+                    deadline=1.0,
+                    lock_timeout=0.020,
+                    clock=lambda: next(ticks),
+                )
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
     def test_nap_builds_rebuildable_tree_and_honors_budget(self) -> None:
         for index in range(40):
             self.store.append("fact", "observed", f"note {index}")
@@ -121,6 +192,43 @@ class StoreTest(unittest.TestCase):
 
 
 class RepositoryIdentityTest(unittest.TestCase):
+    def test_repository_discovery_degrades_on_subprocess_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(
+                layout.subprocess,
+                "run",
+                side_effect=subprocess.TimeoutExpired(["git"], timeout=0.01),
+            ):
+                self.assertIsNone(
+                    current_repo(
+                        Path(directory),
+                        deadline=time.monotonic() + 0.1,
+                    )
+                )
+
+    def test_origin_timeout_does_not_substitute_a_local_repo_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            root_result = subprocess.CompletedProcess(
+                ["git", "rev-parse", "--show-toplevel"],
+                returncode=0,
+                stdout=f"{root}\n",
+            )
+            with mock.patch.object(
+                layout.subprocess,
+                "run",
+                side_effect=(
+                    root_result,
+                    subprocess.TimeoutExpired(["git"], timeout=0.01),
+                ),
+            ):
+                self.assertIsNone(
+                    current_repo(
+                        root,
+                        deadline=time.monotonic() + 0.1,
+                    )
+                )
+
     def test_recognizes_only_codex_native_memory_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
