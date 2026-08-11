@@ -1,0 +1,32 @@
+{
+  "projection": "dream",
+  "age_profile": "mixed",
+  "item_budget": 8,
+  "items": [
+    {
+      "standing": "current",
+      "text": "Run `uv run python -m unittest discover -s tests -t . -v` for narrow validation.",
+      "source_ids": [0]
+    },
+    {
+      "standing": "current",
+      "text": "Decision D-17 keeps the append-only raw log canonical; SQLite was rejected.",
+      "source_ids": [2]
+    },
+    {
+      "standing": "current",
+      "text": "The corrected retry limit is 4, not 3.",
+      "source_ids": [3, 8]
+    },
+    {
+      "standing": "current",
+      "text": "The current endpoint is /v2/memory; /v1/memory is deprecated.",
+      "source_ids": [5, 9]
+    },
+    {
+      "standing": "current",
+      "text": "Raw records are never edited; derived summaries are rebuildable.",
+      "source_ids": [4]
+    }
+  ]
+}
