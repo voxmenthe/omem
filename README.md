@@ -1,39 +1,91 @@
-# Scoped Memory MVP
+# OMem
 
-This directory is a standalone, standard-library-only implementation of scoped
-memory for coding agents. It keeps durable personal and repository memory
-separate, treats raw notes as the only canonical data, and makes every
-compressed projection visibly fallible. The current automatic-orientation
-release decision and measurements are recorded in
+OMem is a scoped, auditable, append-only memory tool for coding agents. It keeps
+personal and repository memory separate, treats raw notes as the only canonical
+data, and labels every compressed projection as fallible.
+
+The runtime uses only the Python standard library. It does **not** run a daemon,
+call a model, edit agent instructions, or write inside your repository. Its
+optional Codex hooks are local, bounded, read-only, and fail open so a memory
+failure cannot block normal Codex work.
+
+OMem is currently alpha software. Review the [storage and failure
+boundaries](#storage-and-failure-boundaries) before using it for important
+work. The automatic-orientation release evidence is in
 [`EVALUATION.md`](EVALUATION.md).
 
-The core tool does **not** run a daemon, call a model, edit agent instructions,
-or write inside a repository. Its optional Codex integration uses one shared
-global user config source with two read-only handlers: bounded,
-prompt-conditioned orientation before a turn and a post-compaction recovery
-checkpoint. Model work and every semantic write remain explicit operations
-performed by the acting primary agent.
+## Quickstart
 
-## Quick start
+### 1. Install the command
 
-Install [uv](https://docs.astral.sh/uv/), then let it provision the pinned
-Python interpreter and project environment. macOS or Linux is required
-(`fcntl` provides process locking).
+OMem requires macOS or Linux, Python 3.12 or newer, Git, and
+[uv](https://docs.astral.sh/uv/).
 
 ```sh
+git clone https://github.com/voxmenthe/omem.git
 cd omem
-uv sync
-uv run memory init
-uv run memory wake
+uv tool install .
+command -v memory
+memory --help
 ```
 
-UV owns `.venv`; no activation or direct `pip install` is needed. See
-[`SETUP.md`](SETUP.md) to install the `memory` command for use from other
-repositories and add the agent instruction block.
+If `command -v memory` prints nothing, run `uv tool update-shell`, restart your
+shell, and check again.
 
-Data defaults to `~/.memory-v0`. Set `MEMORY_V0_DIR` to an explicit private
-location before `init` to isolate an experiment. `init` prints the exact
-instruction block; a checked-in copy is in [`INSTRUCTIONS.md`](INSTRUCTIONS.md).
+### 2. Initialize memory in a repository
+
+Run repository-scoped commands from the repository whose context you want OMem
+to remember:
+
+```sh
+cd /path/to/your/repository
+memory init
+memory wake
+memory status
+```
+
+Data defaults to `~/.memory-v0`; OMem does not add files to the target
+repository. Set `MEMORY_V0_DIR` to an explicit private location before `init`
+when you want an isolated trial.
+
+### 3. Give your coding agent the memory workflow
+
+Merge [`INSTRUCTIONS.md`](INSTRUCTIONS.md) into the target repository's
+`AGENTS.md`, preserving its existing instructions. Start a fresh agent session
+in that repository and confirm it runs `memory init` and `memory wake`.
+
+This step is sufficient for explicit session-start memory. The acting agent
+still decides which durable facts qualify for `memory note`.
+
+### 4. Enable the optional Codex hooks
+
+The hooks add bounded relevant context before a prompt and restore the memory
+checkpoint after compaction:
+
+1. Run `codex doctor --json` from your normal Codex launcher and find the
+   effective `config.toml`.
+2. Merge [`integrations/codex/hooks.toml`](integrations/codex/hooks.toml) into
+   that file. Preserve existing settings and do not install the same handler
+   through another config layer.
+3. Start a fresh Codex session, open `/hooks`, review and trust the two command
+   hooks, and confirm there is exactly one enabled OMem handler for
+   `UserPromptSubmit` and one for `SessionStart` matching `compact`.
+4. Verify the adapter outside Codex:
+
+   ```sh
+   printf '%s\n' \
+     '{"hook_event_name":"UserPromptSubmit","prompt":"test"}' \
+     | memory codex-hook
+   printf '%s\n' \
+     '{"hook_event_name":"SessionStart","source":"compact"}' \
+     | memory codex-hook
+   ```
+
+Each command should print compact JSON containing the matching `hookEventName`
+and `additionalContext`; neither command initializes or writes a memory store.
+See the
+[`SETUP.md`](SETUP.md#complete-installation) runbook for expected output,
+multiple `CODEX_HOME` profiles, validation, development setup, and uninstall.
 
 ## Commands
 
@@ -327,3 +379,24 @@ Deleting the archive is optional and destructive; inspect it and decide
 explicitly. There are no repository files, background jobs, reviewer state, or
 platform memory settings to clean up. Leave unrelated hooks and any retired
 router configuration untouched.
+
+## Contributing
+
+Contributions and focused bug reports are welcome. Create a development
+environment and run the release checks with:
+
+```sh
+uv sync --locked
+uv run --locked python -m unittest discover -s tests -t . -v
+uv run --locked python semantic_eval.py \
+  fixtures/semantic-projection-example.json
+uv run --locked python evaluation/orientation_trials.py
+uv run --locked python benchmarks/orientation_latency.py
+```
+
+Please keep a change focused, add regression coverage for behavior changes,
+and document any user-facing contract change.
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).

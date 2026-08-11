@@ -1,13 +1,14 @@
-# Setup
+# Installation and setup
 
 This project uses [uv](https://docs.astral.sh/uv/) for Python provisioning,
 dependency locking, project environments, command execution, and tool
-installation. Do not create a virtual environment manually or install the
-project with `pip`.
+installation. The installed OMem runtime has no third-party Python
+dependencies.
 
 ## Prerequisites
 
 - macOS or Linux; the implementation uses `fcntl` for process locking.
+- Git.
 - UV on `PATH`. Verify it with:
 
   ```sh
@@ -22,7 +23,8 @@ downloads that interpreter when it is not already available.
 For an end-to-end Codex installation:
 
 1. [Install the `memory` command](#install-the-command-for-use-in-other-repositories)
-   from this checkout and run `memory init` followed by `memory wake`.
+   from a clone, then run `memory init` followed by `memory wake` in the target
+   repository.
 2. [Merge the agent instruction block](#install-the-agent-instructions) into
    the target repository's `AGENTS.md`, preserving any existing instructions.
 3. [Merge and trust the two global hooks](#install-the-optional-global-hooks)
@@ -51,8 +53,9 @@ intended task repository. Recognized `~/.codex-state/repos/*/memories`,
 but refuse OMem repo scope and suppress OMem hook output. The command does not
 guess a target repository, move existing notes, or synchronize native memory.
 
-## Run from the checkout
+## Run from the checkout for development
 
+This is the contributor workflow; it is not required for normal installation.
 From the `omem` directory:
 
 ```sh
@@ -80,22 +83,35 @@ Keep the exported value for the trial session; the command prints the resolved s
 The agent instructions invoke `memory` directly, so install it as a UV tool:
 
 ```sh
+git clone https://github.com/voxmenthe/omem.git
 cd omem
-uv tool install --editable .
+uv tool install .
 command -v memory
+cd /path/to/your/repository
 memory init
 memory wake
 ```
 
-Editable installation makes source changes available without reinstalling the tool. If project metadata or dependencies change, refresh the tool environment with:
+If `command -v memory` prints nothing, add UV's executable directory to your
+shell configuration, restart the shell, and check again:
 
 ```sh
-uv tool install --force --editable .
+uv tool update-shell
 ```
 
 UV places tool executables in the directory printed by `uv tool dir --bin`.
-That directory must be on the agent's `PATH`; otherwise, use the absolute
-executable path in the installed instructions.
+That directory must also be on the environment `PATH` used to launch Codex.
+
+A contributor who wants source edits to affect the global command immediately
+can replace the normal installation with:
+
+```sh
+cd omem
+uv tool install --force --editable .
+```
+
+Refresh a normal non-editable installation after pulling a new version with
+`uv tool install --force .`.
 
 ## Install the agent instructions
 

@@ -43,6 +43,22 @@ class PackagingTest(unittest.TestCase):
             "omem/SESSION_REVIEW.md",
             {str(path) for path in installed.files or ()},
         )
+        self.assertEqual(
+            ["LICENSE"],
+            installed.metadata.get_all("License-File"),
+        )
+        self.assertEqual(
+            "Apache-2.0",
+            installed.metadata["License-Expression"],
+        )
+        self.assertIn(
+            "LICENSE",
+            {str(path) for path in installed.files or ()},
+        )
+        self.assertIn(
+            "Apache License",
+            (PROJECT / "LICENSE").read_text(encoding="utf-8"),
+        )
         instructions = resources.files("omem").joinpath("INSTRUCTIONS.md")
         self.assertIn("## Memory Store", instructions.read_text(encoding="utf-8"))
         self.assertEqual(

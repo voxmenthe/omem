@@ -2,6 +2,11 @@
 *.egg-info/
 __pycache__/
 *.py[cod]
-REFERENCE-REPOS
-PLANS
+/build/
+/dist/
+/.pytest_cache/
+/.coverage
+/REFERENCE-REPOS/
+/PLANS/
+/PAPERS/
 .DS_Store
