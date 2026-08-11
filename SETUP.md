@@ -143,11 +143,6 @@ uv run --locked python evaluation/orientation_trials.py
 uv run --locked python benchmarks/orientation_latency.py
 ```
 
-The semantic fixture verifies the projection scoring harness. The orientation
-trial and latency reports reproduce the controlled Release A outcome gate.
-[`EVALUATION.md`](EVALUATION.md) records that decision and separates it from the
-real-session follow-up.
-
 ## Change dependencies
 
 Use UV so `pyproject.toml`, `uv.lock`, and `.venv` stay synchronized:

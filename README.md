@@ -1,25 +1,38 @@
 # OMem
 
-OMem is a scoped, auditable, append-only memory tool for coding agents. It keeps
-personal and repository memory separate, treats raw notes as the only canonical
-data, and labels every compressed projection as fallible.
+OMem gives coding agents memory that lasts across sessions. Personal memories
+and project memories live in separate stores. Each raw note is saved once and
+stays unchanged. OMem builds summaries from those notes and marks every summary
+as something that may be wrong.
 
-The runtime uses only the Python standard library. It does **not** run a daemon,
-call a model, edit agent instructions, or write inside your repository. Its
-optional Codex hooks are local, bounded, read-only, and fail open so a memory
-failure cannot block normal Codex work.
+OMem grew from Victor Taelin's
+[OptMem](https://github.com/VictorTaelin/OptMem). Both projects keep raw notes
+in a log without changing earlier entries. Both group older notes into shorter
+summaries while keeping recent notes in more detail. OptMem fits in one Python
+file, uses one active store, and lets you open an old summary with `zoom`. OMem
+adds separate personal and repository stores. It records where information came
+from, and each curated summary, called a dream, points back to the raw notes
+that support it. OMem also identifies repositories and can bring relevant
+memory into Codex through hooks with fixed limits. That extra work makes OMem
+larger. It keeps personal and project data apart and shows where memories came
+from. Codex continues when memory lookup fails. Opening summaries with `zoom`
+remains future work.
 
-OMem is currently alpha software. Review the [storage and failure
-boundaries](#storage-and-failure-boundaries) before using it for important
-work. The automatic-orientation release evidence is in
-[`EVALUATION.md`](EVALUATION.md).
+The CLI runs only when you or Codex call it. It uses the Python standard
+library and calls no model. Your repository files and agent instructions stay
+untouched. The optional hooks only read existing memory. Fixed time and size
+limits keep their work small. Codex continues when a hook fails.
+
+OMem is alpha software. Read the [storage and failure
+boundaries](#storage-and-failure-boundaries) before trusting it with important
+work.
 
 ## Quickstart
 
 ### 1. Install the command
 
-OMem requires macOS or Linux, Python 3.12 or newer, Git, and
-[uv](https://docs.astral.sh/uv/).
+Use macOS or Linux with Python 3.12 or newer, Git, and
+[uv](https://docs.astral.sh/uv/). Install OMem from a fresh clone:
 
 ```sh
 git clone https://github.com/voxmenthe/omem.git
@@ -29,13 +42,17 @@ command -v memory
 memory --help
 ```
 
-If `command -v memory` prints nothing, run `uv tool update-shell`, restart your
-shell, and check again.
+If `command -v memory` prints nothing, add uv's tool directory to your shell:
+
+```sh
+uv tool update-shell
+```
+
+Restart the shell and run `command -v memory` again.
 
 ### 2. Initialize memory in a repository
 
-Run repository-scoped commands from the repository whose context you want OMem
-to remember:
+Open the repository you want OMem to remember, then create its memory:
 
 ```sh
 cd /path/to/your/repository
@@ -44,31 +61,33 @@ memory wake
 memory status
 ```
 
-Data defaults to `~/.memory-v0`; OMem does not add files to the target
-repository. Set `MEMORY_V0_DIR` to an explicit private location before `init`
+OMem stores data under `~/.memory-v0` by default. The target repository stays
+unchanged. Set `MEMORY_V0_DIR` to a private test directory before `memory init`
 when you want an isolated trial.
 
 ### 3. Give your coding agent the memory workflow
 
 Merge [`INSTRUCTIONS.md`](INSTRUCTIONS.md) into the target repository's
-`AGENTS.md`, preserving its existing instructions. Start a fresh agent session
-in that repository and confirm it runs `memory init` and `memory wake`.
+`AGENTS.md`. Keep the instructions that are already there. Start a fresh agent
+session in that repository and confirm that it runs `memory init` and
+`memory wake`.
 
-This step is sufficient for explicit session-start memory. The acting agent
-still decides which durable facts qualify for `memory note`.
+The agent can now read memory at the start of a session. It decides what is
+useful enough to save with `memory note`.
 
 ### 4. Enable the optional Codex hooks
 
-The hooks add bounded relevant context before a prompt and restore the memory
-checkpoint after compaction:
+The prompt hook can bring useful memories into Codex before it answers. The
+compaction hook restores the memory instructions after Codex shrinks its
+context.
 
-1. Run `codex doctor --json` from your normal Codex launcher and find the
-   effective `config.toml`.
+1. Run `codex doctor --json` from the Codex launcher you normally use. Find the
+   `config.toml` that Codex loaded.
 2. Merge [`integrations/codex/hooks.toml`](integrations/codex/hooks.toml) into
-   that file. Preserve existing settings and do not install the same handler
-   through another config layer.
+   that file. Keep its current settings and install one copy of each OMem
+   handler.
 3. Start a fresh Codex session, open `/hooks`, review and trust the two command
-   hooks, and confirm there is exactly one enabled OMem handler for
+   hooks. Confirm that there is one enabled OMem handler for
    `UserPromptSubmit` and one for `SessionStart` matching `compact`.
 4. Verify the adapter outside Codex:
 
@@ -81,11 +100,10 @@ checkpoint after compaction:
      | memory codex-hook
    ```
 
-Each command should print compact JSON containing the matching `hookEventName`
-and `additionalContext`; neither command initializes or writes a memory store.
-See the
-[`SETUP.md`](SETUP.md#complete-installation) runbook for expected output,
-multiple `CODEX_HOME` profiles, validation, development setup, and uninstall.
+Each command prints a small JSON object with the matching `hookEventName` and
+`additionalContext`. The commands leave the memory store unchanged. See
+[`SETUP.md`](SETUP.md#complete-installation) for expected output, help with
+multiple `CODEX_HOME` profiles, development setup, validation, and removal.
 
 ## Commands
 
@@ -93,9 +111,10 @@ multiple `CODEX_HOME` profiles, validation, development setup, and uninstall.
 memory init
 memory wake
 memory orient [--explain] "<query>"
-memory note <scope>:<kind>:<provenance> "<text>"
+memory note <scope>:<kind>:<source> "<text>"
 memory recall <scope> <regex>
 memory nap [scope]
+memory nap <scope> <lo>-<hi> "<summary>"
 memory dream <scope>
 memory dream apply <dream-id>  # result JSON on stdin
 memory status
@@ -105,107 +124,107 @@ memory codex-hook               # hook event JSON on stdin
 memory review-sessions <session-path> [<session-path> ...]
 ```
 
-`self` and `repo` are the only durable scopes. Scope is always explicit for a
-write.
+Every saved note names its scope. Use `self` for personal memory and `repo` for
+memory tied to the current repository.
 
 | Scope  | Kinds                                          |
 | ------ | ---------------------------------------------- |
 | `self` | `fact`, `preference`, `episode`                |
 | `repo` | `fact`, `invariant`, `procedure`, `preference` |
 
-Input provenance is `user`, `observed`, or `inferred`. Dream items may also be
-`mixed`. Notes are one trimmed line and the encoded `[kind|provenance] text`
-payload is at most 280 UTF-8 bytes.
+Each note has a source label. Use `user` for something the user said,
+`observed` for something the agent checked, and `inferred` for a conclusion. A
+dream item can use `mixed` when its sources have different labels. Each note is
+one trimmed line. The encoded kind, source label, and text can use at most 280
+UTF-8 bytes.
 
 Examples:
 
 ```sh
 memory note repo:invariant:observed \
-  "The raw log is the sole canonical memory source"
+  "Raw notes are the source of truth for memory"
 memory note self:preference:user \
   "Prefer evidence-backed status updates"
-memory recall repo 'canonical|append-only'
+memory recall repo 'source of truth|append-only'
 memory status
 ```
 
-Write only durable, decision-useful information. Do not store secrets,
-credentials, health/financial data, private third-party data, or transient task
-state. The canonical admission rules are in
-[`INSTRUCTIONS.md`](INSTRUCTIONS.md): explicit reusable user corrections may
-qualify on first occurrence, repeated preferences receive higher confidence,
-and project-specific or unclear preferences remain repo-scoped.
+Save information that will help with a later decision. Keep secrets,
+credentials, health or financial data, private information about other people,
+and short-lived task state out of memory. [`INSTRUCTIONS.md`](INSTRUCTIONS.md)
+contains the full rules. A clear user correction can qualify the first time it
+appears. Repetition makes a preference more certain. Project-specific and
+unclear preferences stay in the `repo` store.
 
 ## Optional Codex integrations
 
-### Memory-system authority
+### How OMem and Codex memory stay separate
 
-OMem raw notes are explicitly admitted, portable memory. OMem dreams and tree
-covers are derived, fallible projections; raw notes remain authoritative within
-OMem. Codex native memory is a separate host-owned, per-repository retrieval
-index. Neither system automatically imports or overwrites the other. Codex
-native-memory maintenance directories are not task repositories for OMem repo
-scope.
+You or your agent choose every raw note that OMem saves. Those notes are OMem's
+source of truth. Dreams and tree summaries are shorter views that may be wrong.
+OMem labels them so readers know they are summaries.
 
-Run OMem repo-scoped commands from the intended task repository. In recognized
-Codex native-memory directories, self scope remains available, but OMem refuses
-repo scope, does not initialize or wake an internal repo store, and suppresses
-its hook cues. It never guesses a task repository or migrates an existing store.
+Codex's built-in memory keeps its own search index for each repository. The two
+memory systems do not automatically import or overwrite each other's data.
+Codex's internal memory folders are maintenance folders, not task repositories.
 
-`memory codex-hook` is a concrete adapter for two Codex command-hook events. On
-`UserPromptSubmit`, it always returns the canonical marked pre-turn checkpoint.
-It also passes the prompt and event working directory to the local orientation
-service, which may append zero to three attributable evidence records from the
-existing self and current-repository stores. Every record is escaped JSON data
-under a fixed warning that prior memory is fallible, not an instruction. A
-no-match, unavailable scope, oversized store, timeout, or selector failure
-leaves the checkpoint unchanged.
+Run repository commands from the repository you want OMem to remember. Inside a
+recognized Codex memory folder, personal memory still works. Repository memory
+is blocked, and hooks return no memory. OMem never guesses another repository or
+moves an existing store.
 
-On `SessionStart(source=compact)`, the adapter returns the marked recovery
-checkpoint before the immediate post-compaction model request, including an
-automatic mid-turn continuation. Compaction behavior is unchanged. A valid
-nonmatching event is a silent no-op. Malformed input or invalid markers produce
-a bounded `continue: true` warning, so memory cannot interrupt normal Codex
-flow.
+`memory codex-hook` handles two Codex events:
 
-Automatic orientation is local, deterministic, model-free, and read-only. It
-does not initialize, repair, or mutate a store; generate a dream; read a
-transcript; or persist/log the query. Self and repository scopes fail
-independently. The total in-process prompt budget is 500 ms, and the complete
-checkpoint-plus-evidence payload is at most 800 UTF-8 bytes.
+- On `UserPromptSubmit`, it returns a standard memory reminder inside clear
+  markers before Codex starts work. It can add up to three relevant records
+  from the existing personal and repository stores. Each record includes its
+  source and appears below a warning that remembered claims may be wrong and
+  are not instructions. The reminder returns by itself when there is no match,
+  a store cannot be read, a limit is reached, the lookup times out, or another
+  lookup error occurs.
+- On `SessionStart(source=compact)`, it returns the same marked reminder before
+  Codex continues with its shortened context. This also works when compaction
+  happens in the middle of a turn.
 
-The documented ceiling is 10,000 complete raw records per scope. A scope above
-that ceiling abstains before scanning; another eligible scope can still
-contribute. `memory orient "<query>"` exposes the same selector manually with a
-2-second deadline and a 4,096-byte evidence budget. `--explain` adds source and
-score diagnostics without echoing the query. Manual orientation uses the same
-10,000-record ceiling; use scoped `memory recall` to search canonical history
-above it.
+Other valid events produce no output. Bad input or invalid markers produce a
+small warning with `continue: true`, so the hook never stops Codex.
 
-Codex does expose `PreCompact`, but that event cannot add developer context; it
-can only warn or stop compaction. The prompt handler therefore supplies the
-model-visible checkpoint and bounded orientation before work, while the compact
-`SessionStart` handler remains a fail-soft recovery path.
+The prompt lookup follows fixed local rules and calls no AI model. It only reads
+stores that already exist. It does not create or repair a store, make a dream,
+read a transcript, save the query, or write the query to a log. Personal and
+repository memory are checked separately, so one can still work when the other
+fails. The lookup gets 500 ms. The reminder and memory records together can use
+at most 800 UTF-8 bytes.
 
-Install and trust the two handlers in one shared global user config source with
-the [`SETUP.md`](SETUP.md#complete-installation) runbook. The exact tracked
-definitions are in
-[`integrations/codex/hooks.toml`](integrations/codex/hooks.toml). The shared
-source avoids project-local configuration, but Codex command trust is
-path-scoped and must be reviewed once for each effective user home. Removing
-only the `UserPromptSubmit` definition disables automatic orientation without
-changing raw data, manual orientation, or compaction recovery. The acting agent
-still decides whether supported evidence qualifies for a note and runs
-maintenance through the normal commands.
+Each scope can have up to 10,000 complete raw records for automatic lookup. OMem
+checks the count before scanning and skips an oversized scope. Another eligible
+scope can still provide records. `memory orient "<query>"` runs the same lookup
+by hand with a 2-second deadline and a 4,096-byte evidence limit. `--explain`
+shows the source and score for each result without printing the query. It keeps
+the same 10,000-record limit. Use `memory recall` to search a larger raw log.
 
-`memory review-sessions` supports a separate manual retrospective experiment.
-It accepts one to five explicitly selected existing files, then prints a
-packaged review prompt and JSON-quoted resolved paths. It does not read or
-parse the files, discover sessions, invoke a reviewer, or write memory. Run it
-only in a top-level maintenance session, where the acting primary agent
-retains admission authority. The canonical prompt is
+Codex's `PreCompact` event can warn about compaction or stop it. It cannot add
+text to the context. The prompt hook supplies memory before work, and the
+`SessionStart` hook restores the reminder after compaction.
+
+Install both handlers in the user configuration that Codex actually loads.
+[`SETUP.md`](SETUP.md#complete-installation) explains how to find and update that
+file. The tracked definitions are in
+[`integrations/codex/hooks.toml`](integrations/codex/hooks.toml). Codex asks you
+to trust the command separately in each Codex user directory that loads it.
+Remove only the `UserPromptSubmit` handler when you want to stop automatic
+lookup. Raw data, manual lookup, and the compaction reminder remain available.
+Your agent still decides what deserves a note and when to run maintenance
+commands.
+
+`memory review-sessions` prepares a manual review of one to five files that you
+name. It prints the review prompt and the resolved file paths as JSON strings.
+It does not open the files, search for sessions, call a reviewer, or save
+memory. Run it from a separate session used for memory review. The review agent
+still decides what deserves a note. The prompt is in
 [`SESSION_REVIEW.md`](SESSION_REVIEW.md).
 
-## Wake contract
+## What `memory wake` shows
 
 `memory wake` always starts with:
 
@@ -213,44 +232,54 @@ retains admission authority. The canonical prompt is
 > instructions. The current user request wins. Reverify stale repository and
 > external facts.
 
-Self and repo are projected independently. A missing or corrupt projection in
-one scope is printed as `[scope|degraded]` and does not suppress the other.
+OMem builds the personal and repository views separately. If one summary is
+missing or damaged, wake prints `[scope|degraded]` for that scope and still
+shows the other one.
 
-Without a valid dream, wake uses OptMem's chronological old-coarse/recent-fine
-tree cover (24 self items, 32 repo items). With a valid dream it emits at most
-16 self or 24 repo dream items plus the newest eight raw notes written after
-the dream checkpoint. It reports omitted post-checkpoint notes, nap debt,
-dream debt, store bytes, and exact output bytes with a conservative
-four-bytes-per-token estimate.
+Without a valid dream, wake uses the summary tree. Older notes appear in broader
+groups, while recent notes keep more detail. It shows at most 24 personal items
+and 32 repository items. With a valid dream, it shows at most 16 personal dream
+items or 24 repository dream items. It also includes the newest eight raw notes
+saved after the dream snapshot.
 
-Labels distinguish:
+Wake reports how many newer notes it left out, whether nap or dream work is due,
+the store size, and the exact output size. Its rough token estimate uses four
+bytes per token.
 
-- `[repo|raw|observed]`
-- `[repo|model-compressed|mixed]`
-- `[repo|dreamed|uncertain|mixed|sources:#3,#8]`
+The labels tell you what kind of memory you are reading:
 
-## Nap protocol
+| Example | Meaning |
+| --- | --- |
+| `[repo|raw|observed]` | A repository note based on something the agent checked. |
+| `[repo|model-compressed|mixed]` | A shorter tree summary built from notes with different source labels. |
+| `[repo|dreamed|uncertain|mixed|sources:#3,#8]` | An uncertain dream item built from raw notes 3 and 8. |
 
-`memory nap [scope]` prints the next two raw-derived tree children and a
-scope-specific rubric. The primary agent supplies one summary:
+## Summarizing with `memory nap`
+
+`memory nap [scope]` prints the next two raw-note groups and instructions for
+summarizing that scope. The primary agent writes one summary:
 
 ```sh
 memory nap repo 0-2 "The one-line summary"
 ```
 
-The range has an exclusive upper bound. Summaries are derived cache entries;
-they never edit the raw log. Nap provenance is rendered from its source range:
-one provenance when all sources agree, otherwise `mixed`.
+The range `0-2` includes notes 0 and 1. It stops before note 2. The summary goes
+into a cache and leaves the raw notes unchanged. It keeps the original source
+label when every note in the range has the same label. Otherwise it uses
+`mixed`.
 
-## Dream protocol
+## Building a dream with `memory dream`
 
-Dreaming has two explicit phases:
+Dreaming builds a shorter view whose items point back to the raw notes that
+support them. It takes two steps:
 
-1. `memory dream repo` snapshots raw notes `[0,T)`, writes a pending request,
-   and prints a JSON bundle with the sources, rubric, budget, store-unique ID,
-   digest, and exact result contract. No store lock is held while a model
-   reasons.
-2. Pipe JSON-only model output to `memory dream apply <dream-id>`.
+1. `memory dream repo` copies the current raw notes from 0 through `T-1` into a
+   pending request. It prints a JSON bundle with those notes, the instructions,
+   the item limit, an ID for this store, a fingerprint of the contents, and the
+   required result shape. OMem releases the store lock before a model works on
+   the request.
+2. Send the model's JSON result to `memory dream apply <dream-id>` through
+   standard input.
 
 Result shape:
 
@@ -271,25 +300,30 @@ Result shape:
 }
 ```
 
-Application strictly checks the version, scope, checkpoint, item budget, kinds,
-standing, provenance, text length, and source citations. Each generation is an
-immutable JSON file. Only `dreams/current.json` is atomically replaced; older
-generations remain. Equal content within one prompt version is idempotent; an
-older checkpoint or prompt version is stale; different content for the same
-checkpoint and prompt version conflicts. A newer supported prompt version may
-refresh the same raw checkpoint. Any failure leaves the pointer unchanged and
-is visible in command output/status. Raw notes written after `T` remain a
-separately labeled delta.
+The JSON field named `provenance` holds the source label described above.
 
-Dreaming always rebuilds from raw notes, never from a prior dream or summary
-tree. Prompt version 2 asks for the smallest decision-useful current set,
-merges related sources, lets later corrections supersede earlier claims, and
-omits one-off, obsolete, or cheaply recoverable detail. The item budget is a
-ceiling rather than a target or source-coverage requirement. The MVP refuses
-snapshots over 256 raw notes without changing the current dream; scaling beyond
-that bound is an explicit architecture decision. A dream becomes due after
-eight post-checkpoint notes. A note that explicitly corrects a current dreamed
-claim calls for an early handoff refresh even below that threshold.
+OMem checks the version, scope, note count, item limit, kinds, standing, source
+labels, text length, and raw note IDs. Every accepted result gets its own JSON
+file. The small `dreams/current.json` file selects which result is current. OMem
+replaces that file in one operation and keeps older results.
+
+Sending the same content twice for one prompt version is safe and makes no extra
+change. OMem marks a request as `stale` when it uses an older set of raw notes or
+an older prompt version. It marks a result as a `conflict` when the same raw-note
+snapshot and prompt version already have different content. A newer supported
+prompt version can rebuild a dream from the same notes. A failed apply leaves
+the current pointer unchanged and reports the failure in the command output and
+`memory status`. Raw notes saved after `T` stay in a separate, clearly labeled
+group.
+
+Every dream starts from raw notes. It never uses an earlier dream or tree
+summary as input. Prompt version 2 asks for the smallest useful set of current
+information. It combines related notes, follows later corrections, and leaves
+out old or easy-to-find details. The item limit is a maximum. OMem refuses a
+snapshot with more than 256 raw notes and keeps the current dream unchanged.
+Supporting larger snapshots needs a separate design decision. A new dream is
+due after eight notes have been saved since the last snapshot. Refresh sooner
+when a new note directly corrects a current dream item.
 
 ## Storage and failure boundaries
 
@@ -307,34 +341,38 @@ claim calls for an early handoff refresh even below that threshold.
       dreams/{pending,generations,current.json}
 ```
 
-Directories are mode `0700`; managed files are `0600`. Raw and tree records
-are fixed width. IDs are assigned while holding an `fcntl` lock, appends are
-flushed and `fsync`ed, and a partial unacknowledged tail is repaired before the
-next append. Repository identity uses normalized `origin`; without one it uses
-the real Git top-level path. Clones and worktrees with the same origin share a
-store. `memory status` prints the resolved identity and path.
+OMem creates directories with mode `0700` and managed files with mode `0600`.
+Raw and tree records have a fixed width. OMem assigns each ID while holding an
+`fcntl` file lock. It flushes every append and calls `fsync` to send it to disk.
+If a previous write left an incomplete final record, OMem repairs that tail
+before the next append.
 
-Status also prints `dream_projection=<items>/<sources>`, post-checkpoint raw
-count, actionable `pending_dreams`, total `retained_dream_requests`, and
-`dream_failures` plus the latest failure reason. These are read-only visibility
-fields; retained requests and immutable generations are not maintenance debt.
+OMem names a repository store from its normalized Git `origin`. A repository
+without an origin uses the real path of its Git root. Clones and worktrees with
+the same origin share one store. `memory status` shows the resolved identity and
+path.
 
-Break blast radius is one scope store or one derived pointer. Removing the tool
-does not affect normal repository or Codex operation.
+Status also shows `dream_projection=<items>/<sources>`, the number of raw notes
+saved after the dream snapshot, dreams waiting to be applied, retained dream
+requests, failed dreams, and the latest failure reason. Retained requests and
+older dream files are history. They do not mean maintenance is due.
 
-## Native memory and OptMem comparison
+A damaged store affects one memory scope. Damage to `dreams/current.json`
+affects only that scope's summary. Removing OMem leaves normal repository and
+Codex work unchanged.
 
-Run one injection path during evaluation. If native platform memory is enabled,
-do not also inject this tool's wake output into the same sessions; compare them
-as separate cohorts. This MVP provides auditable raw records, explicit scope,
-provenance, citations, and reversible derived state, but adds operator work and
-local storage.
+## Comparing memory systems
 
-Current OptMem also provides `memo zoom <lo>-<hi>`, which opens one compressed
-tree node into its two children and enables precise navigation into old
-history. A scoped `zoom` equivalent is a compatible future read-only command,
-but is not needed for the assessed MVP contract: scoped regex recall can still
-recover canonical raw text, and dream semantics remain raw-only.
+Give each test session memory from one system. Put native Codex memory in one
+group and OMem hook output in another. Separate groups make it possible to tell
+which system helped. OMem needs local storage and occasional maintenance
+commands. In return, you can inspect every raw note, keep personal and project
+notes apart, see where each item came from, follow dream items back to raw note
+IDs, and remove summaries without losing raw notes.
+
+OptMem's `memo zoom <lo>-<hi>` opens a compressed tree node and shows its two
+children. OMem currently searches raw notes with scoped `memory recall`.
+Opening a summary node into its children remains future work.
 
 ## Validation
 
@@ -347,43 +385,40 @@ uv run python evaluation/orientation_trials.py
 uv run python benchmarks/orientation_latency.py
 ```
 
-The unit suite covers metadata boundaries, repository identity, concurrency,
-captured-prefix behavior, torn-tail repair, independent scope failure, raw-only
-dreams, citation/range/budget validation, deterministic selection and conflict
-abstention, hostile data escaping, UTF-8 output budgets, fail-open hook behavior,
-exact compaction compatibility, canonical prompt packaging, and bounded
-reviewer input.
+The unit suite checks the storage and hook promises described above. This
+includes simultaneous writes, incomplete file tails, separate scope failures,
+invalid dream results, lookup limits, unsafe input, output size, compaction, and
+session review input.
 
-The semantic fixture is a reproducible scoring harness. The paired orientation
-trials and representative latency results support the bounded Release A ship
-decision in [`EVALUATION.md`](EVALUATION.md); they are not a substitute for the
-documented real-session follow-up.
+The semantic example file provides repeatable input. The lookup trials check
+which notes OMem selects. The latency benchmark checks the time limits. These
+controlled checks support the current 10,000-record ceiling. Test with real
+Codex sessions before relying on OMem for important work.
 
 ## Removal
 
-1. To disable only automatic orientation, remove the `UserPromptSubmit` handler
-   whose command is `memory codex-hook`; manual orientation and compaction
-   recovery remain available and no data conversion is needed.
-2. For full removal, also remove the `SessionStart`/`^compact$` handler and
-   confirm through Codex `/hooks` that both handlers are absent.
-3. Remove the block from [`INSTRUCTIONS.md`](INSTRUCTIONS.md) wherever you
-   explicitly installed it.
-4. If installed as a UV tool, run `uv tool uninstall scoped-omem`.
-5. Archive data reversibly:
+1. Remove the `UserPromptSubmit` handler whose command is `memory codex-hook` to
+   stop automatic prompt lookup. Manual lookup and the compaction reminder keep
+   working. Your data needs no conversion.
+2. Remove the `SessionStart`/`^compact$` handler for a full hook removal. Open
+   Codex `/hooks` and confirm that both OMem handlers are gone.
+3. Remove the OMem block from each `AGENTS.md` where you copied
+   [`INSTRUCTIONS.md`](INSTRUCTIONS.md).
+4. Run `uv tool uninstall scoped-omem` if you installed OMem as a uv tool.
+5. Move the data to an archive that you can restore later:
 
    ```sh
    mv ~/.memory-v0 ~/.memory-v0.archived
    ```
 
-Deleting the archive is optional and destructive; inspect it and decide
-explicitly. There are no repository files, background jobs, reviewer state, or
-platform memory settings to clean up. Leave unrelated hooks and any retired
-router configuration untouched.
+Keep the archive until you are sure you no longer need it. Deleting it cannot be
+undone. OMem has no repository files, background jobs, review state, or platform
+memory settings to remove. Leave unrelated hooks and Codex settings alone.
 
 ## Contributing
 
-Contributions and focused bug reports are welcome. Create a development
-environment and run the release checks with:
+Contributions and focused bug reports are welcome. Set up the development
+environment and run these checks:
 
 ```sh
 uv sync --locked
@@ -394,8 +429,8 @@ uv run --locked python evaluation/orientation_trials.py
 uv run --locked python benchmarks/orientation_latency.py
 ```
 
-Please keep a change focused, add regression coverage for behavior changes,
-and document any user-facing contract change.
+Keep each change focused. Add a test for changed behavior. Update the docs when
+a user-facing promise changes.
 
 ## License
 
