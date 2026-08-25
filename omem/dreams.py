@@ -169,6 +169,11 @@ def _validate_pending_bundle(
 def request_dream(store: MemoryStore) -> dict[str, Any]:
     """Snapshot raw memory and persist the exact model-work request."""
 
+    if store.uses_observation_log():
+        raise DreamError(
+            "dream is the legacy protocol; this store uses consolidation "
+            "(`memory consolidate`)"
+        )
     notes = store.snapshot()
     if len(notes) > MAX_DREAM_SOURCE_NOTES:
         raise DreamError(
@@ -508,6 +513,11 @@ def apply_dream(dream_id: str, result: dict[str, Any]) -> DreamArtifact:
     if pending_scope not in ("self", "repo"):
         raise DreamError("pending dream has an invalid scope")
     store = MemoryStore(store_path, pending_scope)
+    if store.uses_observation_log():
+        raise DreamError(
+            "legacy dream results cannot replace an integrated generation; "
+            "the store has migrated to consolidation"
+        )
     scope = _validate_pending_bundle(pending, dream_id, store)
     try:
         notes = store.snapshot(limit=pending["source_count"])

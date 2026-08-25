@@ -17,7 +17,8 @@ from omem.dreams import (
     request_dream,
 )
 from omem.layout import scope_path
-from omem.store import MemoryStore
+
+from .helpers import make_legacy_store
 
 
 def _result(bundle: dict, text: str = "Canonical fact") -> dict:
@@ -56,8 +57,7 @@ class DreamTest(unittest.TestCase):
             os.environ, {"MEMORY_V0_DIR": str(self.root)}
         )
         self.environment.start()
-        self.store = MemoryStore(scope_path("self"), "self")
-        self.store.initialize()
+        self.store = make_legacy_store(scope_path("self"), "self")
 
     def tearDown(self) -> None:
         self.environment.stop()
@@ -78,8 +78,7 @@ class DreamTest(unittest.TestCase):
         self.assertEqual(len(bundle["source_digest"]), 64)
 
     def test_request_requires_selective_consolidation(self) -> None:
-        repo_store = MemoryStore(self.root / "repos" / "fixture", "repo")
-        repo_store.initialize()
+        repo_store = make_legacy_store(self.root / "repos" / "fixture", "repo")
         self._note("self source")
         repo_store.append("fact", "observed", "repo source")
 
@@ -168,10 +167,8 @@ class DreamTest(unittest.TestCase):
         )
 
     def test_identical_repo_snapshots_have_store_unique_dream_ids(self) -> None:
-        first = MemoryStore(self.root / "repos" / "first", "repo")
-        second = MemoryStore(self.root / "repos" / "second", "repo")
-        first.initialize()
-        second.initialize()
+        first = make_legacy_store(self.root / "repos" / "first", "repo")
+        second = make_legacy_store(self.root / "repos" / "second", "repo")
         for store in (first, second):
             store.append("fact", "observed", "same source")
         first_bundle = request_dream(first)
