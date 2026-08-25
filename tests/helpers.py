@@ -5,6 +5,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from omem.layout import secure_directory
+from omem.store import MemoryStore
+
 PROJECT = Path(__file__).resolve().parents[1]
 MEMORY = PROJECT / "memory"
 
@@ -26,6 +29,19 @@ def run_memory(
         capture_output=True,
         text=True,
     )
+
+
+def make_legacy_store(path: Path, scope: str) -> MemoryStore:
+    """Build a legacy-format store (raw LOG.txt, no observation log)."""
+
+    store = MemoryStore(path, scope)  # type: ignore[arg-type]
+    secure_directory(path)
+    secure_directory(store.tree_path)
+    secure_directory(path / "dreams" / "pending")
+    secure_directory(path / "dreams" / "generations")
+    store.log_path.touch(mode=0o600)
+    store.lock_path.touch(mode=0o600)
+    return store
 
 
 def git(cwd: Path, *args: str) -> str:

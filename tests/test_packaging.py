@@ -84,6 +84,45 @@ class PackagingTest(unittest.TestCase):
                 PROJECT / "SESSION_REVIEW.md"
             )
         )
+    def test_tracked_codex_hooks_keep_two_read_only_routes(self) -> None:
+        import tomllib
+
+        config = tomllib.loads(
+            (PROJECT / "integrations" / "codex" / "hooks.toml").read_text(
+                encoding="utf-8"
+            )
+        )
+        hooks = config["hooks"]
+        self.assertEqual(set(hooks), {"UserPromptSubmit", "SessionStart"})
+        prompt_routes = hooks["UserPromptSubmit"]
+        self.assertEqual(len(prompt_routes), 1)
+        self.assertEqual(
+            prompt_routes[0]["hooks"],
+            [
+                {
+                    "type": "command",
+                    "command": "memory codex-hook",
+                    "timeout": 3,
+                    "statusMessage": "Loading memory turn context",
+                    "additionalContextLimit": 800,
+                }
+            ],
+        )
+        session_routes = hooks["SessionStart"]
+        self.assertEqual(len(session_routes), 1)
+        self.assertEqual(session_routes[0]["matcher"], "^compact$")
+        self.assertEqual(
+            session_routes[0]["hooks"],
+            [
+                {
+                    "type": "command",
+                    "command": "memory codex-hook",
+                    "timeout": 3,
+                    "statusMessage": "Loading memory recovery checkpoint",
+                    "additionalContextLimit": 800,
+                }
+            ],
+        )
 
 
 if __name__ == "__main__":

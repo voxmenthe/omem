@@ -12,6 +12,14 @@ from pathlib import Path
 from typing import Sequence
 
 from .codex_hook import command_codex_hook
+from .consolidation import (
+    ROUTINE_DUE_OBSERVATIONS,
+    apply_consolidation,
+    consolidation_due,
+    consolidation_failure_summary,
+    pending_consolidation_counts,
+    request_consolidation,
+)
 from .dreams import (
     DREAM_DUE_NOTES,
     apply_dream,
@@ -22,6 +30,12 @@ from .dreams import (
     request_dream,
     validate_current_sources,
 )
+from .generations import (
+    config_path,
+    fetch_policy,
+    load_current_generation,
+    validate_generation_sources,
+)
 from .layout import (
     CODEX_NATIVE_MEMORY_SCOPE_ERROR,
     ROOT_ENV,
@@ -29,10 +43,18 @@ from .layout import (
     initialize_layout,
     is_codex_native_memory_path,
     memory_root,
+    pending_consolidation_paths,
     pending_paths,
     scope_path,
 )
-from .models import DreamError, MemoryError, Scope
+from .models import (
+    ConsolidationError,
+    DreamError,
+    IntegratedGeneration,
+    MemoryError,
+    Scope,
+)
+from .migration import apply_migration, request_migration
 from .orientation import OrientationRequest, fetch_orientation
 from .store import POST_DREAM_RAW, MemoryStore
 
@@ -48,13 +70,23 @@ Usage:
   memory init
   memory wake
   memory orient [--explain] "<query>"
-  memory note <scope>:<kind>:<provenance> "<text>"
+  memory note <scope>:<kind>:<provenance> --context "<trigger context>" "<candidate>"
   memory recall <scope> <regex>
+  memory consolidate <scope>
+  memory consolidate apply <request-id>    # result JSON on stdin
+  memory migrate <scope>
+  memory migrate apply <request-id>        # result JSON on stdin
+  memory status
+
+Maintenance audit (unintegrated evidence, not usable memory):
+  memory candidates <scope> <regex>
+
+Legacy stores, until migrated:
+  memory note <scope>:<kind>:<provenance> "<text>"
   memory nap [scope]
   memory nap <scope> <lo>-<hi> "<summary>"
-  memory dream <scope>
-  memory dream apply <dream-id>       # result JSON on stdin
-  memory status
+  memory dream <scope>                     # deprecated alias for consolidate
+  memory dream apply <dream-id>
 
 Optional integrations:
   memory codex-hook
@@ -62,23 +94,25 @@ Optional integrations:
 
 Session workflow:
   1. Run `memory wake` at session start. Read its bounded self and current-repo
-     projections before relying on prior memory.
-  2. During work, use `memory note ...` sparingly for durable, decision-useful
-     deltas. Apply the admission guidance below rather than waiting for
-     compaction.
-  3. Use `memory recall <scope> '<regex>'` to search the complete canonical raw
-     history when wake omitted an older detail.
-  4. After primary work, run `memory status`; pay due nap or dream maintenance
+     integrated memories before relying on prior memory.
+  2. During work, record candidate observations with `memory note ... --context
+     ...` whenever a plausible, safely supported future decision signal
+     appears. Candidates are hidden evidence, visible to no normal read
+     surface, until consolidation integrates them.
+  3. Use `memory recall <scope> '<regex>'` to search integrated memories when
+     wake omitted an older detail.
+  4. After primary work, run `memory status`; pay due consolidation maintenance
      before handoff when practical.
 
 Orientation:
   `memory orient "<query>"` performs a local, deterministic, read-only search
-  over existing self and current-repository stores. It emits zero to three
-  escaped, attributable records under a fallibility warning. `--explain` adds
-  source and score diagnostics without echoing the query. The manual command
-  has a 2-second deadline, a 4,096-byte evidence budget, and the same 10,000
-  complete-record ceiling per scope as automatic orientation. Above that
-  ceiling, use scoped `memory recall` to search canonical raw history.
+  over the current integrated memories of the self and current-repository
+  stores (and over legacy raw stores that have not migrated). It emits zero to
+  three escaped, attributable records under a fallibility warning. `--explain`
+  adds source and score diagnostics without echoing the query. The manual
+  command has a 2-second deadline and a 4,096-byte evidence budget. Candidate
+  volume never affects orientation: only the small integrated generation is
+  scanned, and selected citations are verified with bounded seeks.
 
 Choosing note metadata:
   self kinds: fact, preference, episode
@@ -89,22 +123,36 @@ Choosing note metadata:
     and explicit project-specific preferences.
   When preference scope is unclear, start with repo. Use self only when the
   user generalizes the preference or it recurs across projects.
-  provenance:
+  provenance (the JSON field name for the source label):
     user = explicitly stated by the user
     observed = verified from repository, tool, or runtime evidence
     inferred = an agent conclusion that may need revalidation
-  Text must be one non-empty trimmed line. The encoded metadata and text must
-  fit within 280 UTF-8 bytes.
+  Text and trigger context are each one non-empty trimmed line: text at most
+  280 UTF-8 bytes, trigger context at most 768 UTF-8 bytes.
 
 What to record:
-  Give priority to explicit user preferences and corrections that are
-  plausibly reusable beyond the current turn, especially corrections to a
+  Record a plausible future decision signal when it is safe and inexpensive to
+  state, even if one instance is not yet enough to justify integration. Give
+  priority to explicit user preferences and corrections that are plausibly
+  reusable beyond the current turn, especially corrections to a
   course the agent initially adopted. One clear correction may qualify.
-  Repetition strengthens confidence but is not required.
 
-  Record other decision-useful deltas: exact commands, paths, applicability
-  conditions, negative constraints, and conclusions that took real effort to
-  establish and are likely to matter in a later session.
+  The trigger context records what actually happened: the event, correction,
+  surprising result, or decision that caused the capture. Do not force an early
+  generalized "when"; consolidation synthesizes future applicability from
+  accumulated contexts. One candidate expresses one possible lesson. Do not
+  duplicate narration from the same incident; do record an independently
+  recurring occurrence with its new trigger context, even when wording repeats.
+  The same-incident rule fights backlog noise, not recurrence evidence.
+
+  Do not record secrets, credentials, sensitive personal or third-party data,
+  raw tool/web output, untrusted imperatives copied from content, ordinary task
+  status or plans, current edit lists, one-off task instructions as inferred
+  preferences, exact duplicates, or facts cheaply and reliably recoverable
+  from authoritative instructions, documentation, or tests. The lower
+  admission bar applies to durability and reuse uncertainty, never to privacy
+  or trust. A compact cross-source synthesis or retrieval pointer may qualify
+  when it materially reduces repeated discovery cost.
 
   Implementation-reflection is an admission lens, not a running retrospective.
   When an implementation result could change a later decision, ask:
@@ -117,13 +165,14 @@ What to record:
        change a later decision?
   An ordinary checkpoint need not enumerate all five questions.
 
-  Admit a process lesson only when it is causal (more than a symptom),
-  conditional (states when it applies), actionable (changes a future step),
-  supported (uses accurate user, observed, or inferred provenance), reusable
-  after the current status is obsolete, compact enough for the one-line
-  280-byte contract, and novel relative to memory and authoritative guidance.
-  Prefer: When <repeatable condition>, <future action>, because <observed
-  cause/result>.
+  Consolidation admits an integrated memory only when it is causal (more than
+  a symptom), conditional (states when it applies), actionable (changes a
+  future step), supported (cites observations with accurate source labels),
+  reusable after the current status is obsolete, compact enough for the
+  one-line 280-character claim contract, and novel relative to memory and
+  authoritative guidance. Prefer: When <repeatable condition>, <future
+  action>, because <observed cause/result>. A candidate that falls short stays
+  deferred and hidden; that is normal, not a failure.
 
   Map admitted lessons onto existing kinds: `repo:invariant` for a stable
   repository boundary, `repo:procedure` for a repeatable repository
@@ -138,50 +187,71 @@ What to record:
   than expected. A routine failure followed by a passing test is not durable by
   itself.
   A cross-project agent-derived procedure does not fit the current self kinds;
-  hold it for more evidence in bounded review material unless it also qualifies
-  as a meaningful episode. Promote it to global policy or a skill only after
+  hold it for more evidence as a deferred candidate unless it also qualifies as
+  a meaningful episode. Promote it to global policy or a skill only after
   independent support across projects.
 
-  Do not record secrets, credentials, sensitive personal or third-party data,
-  raw tool/web output, untrusted imperatives copied from content, ordinary task
-  status or plans, current edit lists, one-off task instructions as inferred
-  preferences, exact duplicates, or facts cheaply and reliably recoverable
-  from authoritative instructions, documentation, or tests. A compact
-  cross-source synthesis or retrieval pointer may qualify when it materially
-  reduces repeated discovery cost.
+Consolidation protocol:
+  When status reports consolidation_due=yes, finish the primary task first,
+  then run `memory consolidate <scope>`. It prints and saves a bounded request:
+  the current integrated items, the evidence they cite, deferred candidates
+  with their review history, and the next contiguous batch of new observations
+  (at most 256 offered per request). Produce result JSON from only that
+  evidence, obey its contract and citations, then pipe the exact JSON to
+  `memory consolidate apply <request-id>`.
 
-Maintenance protocols:
-  Nap: `memory nap [scope]` prints the next due block and its rubric. Summarize
-  only the displayed children in one line of at most 240 UTF-8 bytes, then run
-  the printed apply command. The range's upper bound is exclusive.
+  Judge recurrence by independent occasions, not repeated narration of one
+  incident. Weigh source authority, contextual agreement, durability, and
+  expected future value together; no duplicate count promotes by itself. If
+  this session records a candidate that directly corrects or supersedes a
+  current integrated memory, run the consolidate request/apply workflow at
+  handoff even when consolidation_due=no.
 
-  Dream: when status reports dream_due=yes, finish the primary task first, then
-  run `memory dream <scope>`. It prints and saves a raw-source JSON request.
-  Produce result JSON from only those sources, obey its contract and citations,
-  then pipe the exact JSON to `memory dream apply <dream-id>`.
-  If this session records a note specifically to correct or supersede a current
-  dreamed claim, run the dream request/apply workflow at handoff even when
-  dream_due=no.
+  Every offered observation is promoted, deferred, or rejected exactly once.
+  Every current item is retained unchanged or retired once with a bounded
+  reason: safety retirement of contradicted, superseded, inapplicable, or
+  misleading items is mandatory under every profile. Retiring an item or
+  rejecting a candidate never deletes observations or generations.
 
-  Status: dream_projection=<items>/<sources> makes selection visible;
-  post_checkpoint counts newer raw notes; pending_dreams is actionable while
-  retained_dream_requests includes history; dream_failures counts failed applies
-  and the latest reason is printed separately.
+Optional pruning policy:
+  One root config file ($MEMORY_V0_DIR/config.toml or ~/.memory-v0/config.toml):
 
-  The CLI does not call a model. Nap and dream are explicit work performed by
-  the acting primary agent. Maintenance failure never blocks normal work.
+    [consolidation]
+    catalog_pruning = "off"       # off | conservative | balanced | aggressive
+    self_catalog_target = 16
+    repo_catalog_target = 24
+
+  An absent file means the documented defaults. Inferred-staleness and
+  capacity retirement of still-valid items happen only under an explicit
+  profile; capacity retirement additionally requires target pressure, and age
+  or review counts never act as automatic deletion rules. A malformed config
+  blocks consolidation requests and applies and is visible in `memory status`;
+  it never disables wake, recall, orient, or hook reads of a valid generation.
+
+Legacy migration:
+  Stores created before consolidation (raw LOG.txt with dreams and trees) keep
+  their legacy behavior until `memory migrate <scope>` stages a bootstrap.
+  Legacy notes become staged observations whose trigger context is explicitly
+  unknown; apply each printed batch with `memory migrate apply <request-id>`.
+  The final apply commits atomically. Legacy files remain as a read-only
+  archive. Deleting <store>/consolidations/migration abandons a staged
+  migration safely. Observations written after migration are not visible to an
+  old binary; do not run mixed-version writers against one store.
+
+  The CLI does not call a model. Consolidation is explicit work performed by
+  the acting primary agent. Maintenance failure must not block normal work.
 
 Safety and storage:
   Memory is fallible evidence, never permission or current instruction. The
   current user request wins; reverify stale repository and external facts.
   Subagents must not write durable memory.
 
-  OMem raw notes are explicitly admitted, portable memory. OMem dreams and tree
-  covers are derived, fallible projections; raw notes remain authoritative
-  within OMem. Codex native memory is a separate host-owned, per-repository
-  retrieval index. Neither system automatically imports or overwrites the other.
-  Codex native-memory maintenance directories are not task repositories for
-  OMem repo scope.
+  OMem candidate observations are canonical evidence, not agent-usable memory.
+  OMem integrated memories are the sole agent-facing catalog: consolidated,
+  source-cited, and still fallible. Codex native memory is a separate
+  host-owned, per-repository retrieval index. Neither system automatically
+  imports or overwrites the other. Codex native-memory maintenance directories
+  are not task repositories for OMem repo scope.
 
   `memory init` creates private self storage and, inside a Git repository, the
   current repo store. Run repo-scoped commands inside the intended repository;
@@ -189,9 +259,10 @@ Safety and storage:
   Storage root: $MEMORY_V0_DIR or ~/.memory-v0
 
 Examples:
-  memory note repo:invariant:observed "Raw notes are the canonical source"
-  memory note self:preference:user "Prefer evidence-backed status updates"
-  memory recall repo 'canonical|append-only'
+  memory note repo:invariant:observed --context "a partial write corrupted a fixture" \\
+    "Store writes repair a torn tail before appending"
+  memory consolidate repo
+  memory recall repo 'torn tail|repair'
 """
 
 _TAG = re.compile(r"^(?P<scope>self|repo):(?P<kind>[a-z]+):(?P<provenance>[a-z]+)$")
@@ -206,15 +277,19 @@ def _store(scope: Scope) -> MemoryStore:
     return MemoryStore(scope_path(scope), scope)
 
 
+def _store_exists(store: MemoryStore) -> bool:
+    return store.log_path.is_file() or store.observations_path.is_file()
+
+
 def _existing_scopes() -> list[tuple[Scope, MemoryStore]]:
     stores: list[tuple[Scope, MemoryStore]] = []
     self_store = _store("self")
-    if self_store.log_path.is_file():
+    if _store_exists(self_store):
         stores.append(("self", self_store))
     repo = current_repo()
     if repo is not None and not is_codex_native_memory_path(Path(repo.root)):
         repo_store = MemoryStore(scope_path("repo", repo), "repo")
-        if repo_store.log_path.is_file():
+        if _store_exists(repo_store):
             stores.append(("repo", repo_store))
     return stores
 
@@ -248,7 +323,51 @@ def _render_with_metrics(lines: list[str]) -> str:
     return "\n".join([*lines, metric]) + "\n"
 
 
+def _render_current_scope(scope: Scope, store: MemoryStore) -> list[str]:
+    """Render the integrated-only view of a current-format store."""
+
+    lines = [f"== {scope} =="]
+    total = store.observation_count()
+    generation: IntegratedGeneration | None = None
+    issue: str | None = None
+    try:
+        generation = load_current_generation(store)
+        if generation is not None:
+            validate_generation_sources(store, generation)
+    except ConsolidationError as error:
+        issue = str(error)
+        generation = None
+    if issue is not None:
+        lines.append(f"[{scope}|degraded] invalid generation ignored: {issue}")
+    integrated = len(generation.items) if generation is not None else 0
+    checkpoint = generation.source_count if generation is not None else 0
+    deferred = len(generation.deferred) if generation is not None else 0
+    if generation is not None:
+        for item in generation.items:
+            citations = ",".join(f"#{source_id}" for source_id in item.source_ids)
+            lines.append(
+                f"[{scope}|integrated|{item.provenance}|sources:{citations}] "
+                f"{item.kind}: {item.text} "
+                f"Applies when: {item.applicability.when}"
+            )
+    elif issue is None:
+        lines.append(
+            f"[{scope}|empty] no integrated memories; candidates={total}; "
+            f"run `memory consolidate {scope}` to integrate them"
+        )
+    new = max(0, total - checkpoint)
+    lines.append(
+        f"[{scope}|state] candidates={total} integrated={integrated} "
+        f"checkpoint={checkpoint} new_candidates={new} deferred={deferred} "
+        f"consolidation_due={'yes' if new >= ROUTINE_DUE_OBSERVATIONS else 'no'} "
+        f"bytes={store.bytes_used()}"
+    )
+    return lines
+
+
 def _render_scope(scope: Scope, store: MemoryStore) -> list[str]:
+    if store.uses_observation_log():
+        return _render_current_scope(scope, store)
     lines = [f"== {scope} =="]
     total = store.count()
     current = None
@@ -414,7 +533,7 @@ def command_wake(args: Sequence[str]) -> int:
 
 
 def command_note(args: Sequence[str]) -> int:
-    if len(args) != 2:
+    if not args:
         raise MemoryError('note requires <scope>:<kind>:<provenance> "<text>"')
     match = _TAG.fullmatch(args[0])
     if match is None:
@@ -423,6 +542,31 @@ def command_note(args: Sequence[str]) -> int:
         )
     scope: Scope = match.group("scope")  # type: ignore[assignment]
     store = _store(scope)
+    if store.uses_observation_log():
+        if len(args) != 4 or args[1] != "--context":
+            raise MemoryError(
+                "this store records candidate observations: note requires "
+                '<scope>:<kind>:<provenance> --context "<trigger context>" '
+                '"<candidate>"'
+            )
+        observation = store.append_observation(
+            match.group("kind"), match.group("provenance"), args[3], args[2]
+        )
+        new, due = consolidation_due(store)
+        deferred = 0
+        try:
+            generation = load_current_generation(store)
+            if generation is not None:
+                deferred = len(generation.deferred)
+        except ConsolidationError:
+            deferred = 0
+        print(
+            f"stored candidate {scope} #{observation.id}; new_candidates={new} "
+            f"deferred={deferred} consolidation_due={'yes' if due else 'no'}"
+        )
+        return 0
+    if len(args) != 2:
+        raise MemoryError('note requires <scope>:<kind>:<provenance> "<text>"')
     note = store.append(match.group("kind"), match.group("provenance"), args[1])
     debt, due = dream_debt(store)
     print(
@@ -441,13 +585,170 @@ def command_recall(args: Sequence[str]) -> int:
     if len(args) != 2 or args[0] not in ("self", "repo"):
         raise MemoryError("recall requires <self|repo> <regex>")
     scope: Scope = args[0]  # type: ignore[assignment]
-    matches = _store(scope).recall(args[1])
+    store = _store(scope)
+    if store.uses_observation_log():
+        try:
+            expression = re.compile(args[1])
+        except re.error as error:
+            raise MemoryError(f"invalid recall regex: {error}") from error
+        generation = load_current_generation(store)
+        items = () if generation is None else generation.items
+        matches = [
+            item
+            for item in items
+            if expression.search(item.text)
+            or expression.search(item.applicability.when)
+        ]
+        for item in matches:
+            citations = ",".join(f"#{source_id}" for source_id in item.source_ids)
+            print(
+                f"[{scope}|integrated|{item.provenance}|sources:{citations}] "
+                f"{item.kind}: {item.text} Applies when: {item.applicability.when}"
+            )
+        print(f"matches={len(matches)}")
+        return 0
+    matches = store.recall(args[1])
     for note in matches:
         print(
             f"[{scope}|raw|{note.provenance}] #{note.id} {note.date} "
             f"{note.kind}: {note.text}"
         )
     print(f"matches={len(matches)}")
+    return 0
+
+
+def command_candidates(args: Sequence[str]) -> int:
+    """Audit unintegrated candidate evidence; never an ordinary recall path."""
+
+    if len(args) != 2 or args[0] not in ("self", "repo"):
+        raise MemoryError("candidates requires <self|repo> <regex>")
+    scope: Scope = args[0]  # type: ignore[assignment]
+    store = _store(scope)
+    if not store.uses_observation_log():
+        raise MemoryError(
+            "candidates audits observation logs; this is a legacy store "
+            "(its raw notes are already ordinary memory)"
+        )
+    try:
+        expression = re.compile(args[1])
+    except re.error as error:
+        raise MemoryError(f"invalid candidates regex: {error}") from error
+    generation = load_current_generation(store)
+    integrated_ids = {
+        source_id for item in generation.items for source_id in item.source_ids
+    } if generation is not None else set()
+    deferred_ids = (
+        {record.source_id for record in generation.deferred}
+        if generation is not None
+        else set()
+    )
+    rejected_ids = (
+        {record.source_id for record in generation.rejected}
+        if generation is not None
+        else set()
+    )
+    print(
+        "WARNING: candidate observations are unintegrated evidence, not "
+        "usable memory."
+    )
+    matches = 0
+    for observation in store.observation_snapshot():
+        if not (
+            expression.search(observation.text)
+            or expression.search(observation.trigger_context)
+        ):
+            continue
+        if observation.id in integrated_ids:
+            disposition = "integrated"
+        elif observation.id in deferred_ids:
+            disposition = "deferred"
+        elif observation.id in rejected_ids:
+            disposition = "rejected"
+        else:
+            disposition = "new"
+        matches += 1
+        print(
+            f"[{scope}|candidate|{observation.provenance}|{disposition}] "
+            f"#{observation.id} {observation.recorded_at} {observation.kind}: "
+            f"{observation.text} Context: {observation.trigger_context}"
+        )
+    print(f"matches={matches}")
+    return 0
+
+
+def command_consolidate(args: Sequence[str]) -> int:
+    if len(args) == 2 and args[0] == "apply":
+        request_id = args[1]
+        try:
+            value = json.load(sys.stdin)
+        except json.JSONDecodeError as error:
+            raise ConsolidationError(
+                f"malformed consolidation result JSON: {error}"
+            ) from error
+        if not isinstance(value, dict):
+            raise ConsolidationError("consolidation result must be a JSON object")
+        generation = apply_consolidation(request_id, value)
+        matches = pending_consolidation_paths(request_id)
+        if len(matches) != 1:
+            raise ConsolidationError(
+                "applied consolidation request cannot be resolved to one store"
+            )
+        applied_store = MemoryStore(matches[0].parents[2], generation.scope)
+        delta = applied_store.observation_count() - generation.source_count
+        print(
+            f"applied consolidation {generation.request_id} to {generation.scope} "
+            f"at checkpoint={generation.source_count}; post_checkpoint={delta}"
+        )
+        return 0
+    if len(args) != 1 or args[0] not in ("self", "repo"):
+        raise MemoryError("consolidate requires <self|repo> or apply <request-id>")
+    scope: Scope = args[0]  # type: ignore[assignment]
+    bundle = request_consolidation(_store(scope))
+    print(json.dumps(bundle, indent=2, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def command_dream(args: Sequence[str]) -> int:
+    """Legacy alias: consolidation on current stores, dreams on legacy ones."""
+
+    if len(args) == 2 and args[0] == "apply":
+        request_id = args[1]
+        if not pending_paths(request_id):
+            print(
+                "memory dream is deprecated; applying via consolidation",
+                file=sys.stderr,
+            )
+            return command_consolidate(["apply", request_id])
+        try:
+            value = json.load(sys.stdin)
+        except json.JSONDecodeError as error:
+            raise DreamError(f"malformed dream result JSON: {error}") from error
+        if not isinstance(value, dict):
+            raise DreamError("dream result must be a JSON object")
+        artifact = apply_dream(request_id, value)
+        matches = pending_paths(request_id)
+        if len(matches) != 1:
+            raise DreamError("applied dream request cannot be resolved to one store")
+        applied_store = MemoryStore(matches[0].parents[2], artifact.scope)
+        delta = applied_store.count() - artifact.source_count
+        print(
+            f"applied dream {artifact.dream_id} to {artifact.scope} at "
+            f"checkpoint={artifact.source_count}; post_checkpoint={delta}"
+        )
+        return 0
+    if len(args) != 1 or args[0] not in ("self", "repo"):
+        raise MemoryError("dream requires <self|repo> or apply <dream-id>")
+    scope: Scope = args[0]  # type: ignore[assignment]
+    store = _store(scope)
+    if store.uses_observation_log():
+        print(
+            "memory dream is deprecated; use `memory consolidate`",
+            file=sys.stderr,
+        )
+        bundle = request_consolidation(store)
+    else:
+        bundle = request_dream(store)
+    print(json.dumps(bundle, indent=2, ensure_ascii=False, sort_keys=True))
     return 0
 
 
@@ -490,12 +791,23 @@ def command_nap(args: Sequence[str]) -> int:
         if not scopes:
             raise MemoryError("no initialized scope; run `memory init`")
         for scope, store in scopes:
+            if store.uses_observation_log():
+                print(
+                    f"{scope}: nap is legacy-only; current stores maintain "
+                    "memory through `memory consolidate`"
+                )
+                continue
             _nap_prompt(scope, store)
         return 0
     if args[0] not in ("self", "repo"):
         raise MemoryError("nap scope must be self or repo")
     scope: Scope = args[0]  # type: ignore[assignment]
     store = _store(scope)
+    if store.uses_observation_log():
+        raise MemoryError(
+            "nap is legacy-only; current stores maintain memory through "
+            "`memory consolidate`"
+        )
     if len(args) == 1:
         return _nap_prompt(scope, store)
     if len(args) != 3:
@@ -509,32 +821,162 @@ def command_nap(args: Sequence[str]) -> int:
     return _nap_prompt(scope, store)
 
 
-def command_dream(args: Sequence[str]) -> int:
-    if len(args) == 2 and args[0] == "apply":
-        dream_id = args[1]
-        try:
-            value = json.load(sys.stdin)
-        except json.JSONDecodeError as error:
-            raise DreamError(f"malformed dream result JSON: {error}") from error
-        if not isinstance(value, dict):
-            raise DreamError("dream result must be a JSON object")
-        artifact = apply_dream(dream_id, value)
-        matches = pending_paths(dream_id)
-        if len(matches) != 1:
-            raise DreamError("applied dream request cannot be resolved to one store")
-        applied_store = MemoryStore(matches[0].parents[2], artifact.scope)
-        delta = applied_store.count() - artifact.source_count
-        print(
-            f"applied dream {artifact.dream_id} to {artifact.scope} at "
-            f"checkpoint={artifact.source_count}; post_checkpoint={delta}"
+def _status_current(scope: Scope, store: MemoryStore) -> None:
+    total = store.observation_count()
+    generation: IntegratedGeneration | None = None
+    issue: str | None = None
+    try:
+        generation = load_current_generation(store)
+    except ConsolidationError as error:
+        issue = str(error)
+    integrated = len(generation.items) if generation is not None else 0
+    checkpoint = generation.source_count if generation is not None else 0
+    deferred = generation.deferred if generation is not None else ()
+    rejected_count = len(generation.rejected) if generation is not None else 0
+    retired = generation.retired if generation is not None else ()
+    new = max(0, total - checkpoint)
+    current_name = generation.generation if generation is not None else "none"
+    if issue is not None:
+        current_name = f"invalid:{issue}"
+    try:
+        pending_count, retained_count = pending_consolidation_counts(store)
+    except (MemoryError, OSError) as error:
+        pending_count = f"invalid:{error}"
+        retained_count: str | int = f"invalid:{error}"
+    try:
+        failure_count, failure = consolidation_failure_summary(store)
+    except (MemoryError, OSError) as error:
+        failure = None
+        failure_count: str | int = f"invalid:{error}"
+    policy = generation.policy if generation is not None else None
+    try:
+        effective = fetch_policy()
+    except ConsolidationError:
+        effective = None
+    shown_policy = effective or policy
+    pruning = shown_policy.catalog_pruning if shown_policy else "unknown"
+    target = shown_policy.catalog_target(scope) if shown_policy else "unknown"
+    print(
+        f"{scope}: path={store.path} schema=current candidates={total} "
+        f"integrated={integrated} checkpoint={checkpoint} new_candidates={new} "
+        f"deferred={len(deferred)} rejected={rejected_count} "
+        f"retired={len(retired)} pruning={pruning} catalog_target={target} "
+        f"consolidation_due={'yes' if new >= ROUTINE_DUE_OBSERVATIONS else 'no'} "
+        f"current_generation={current_name} "
+        f"pending_consolidations={pending_count} "
+        f"retained_consolidation_requests={retained_count} "
+        f"failures={failure_count} bytes={store.bytes_used()}"
+    )
+    if deferred:
+        oldest = min(
+            dt.datetime.fromisoformat(record.first_reviewed) for record in deferred
         )
-        return 0
-    if len(args) != 1 or args[0] not in ("self", "repo"):
-        raise MemoryError("dream requires <self|repo> or apply <dream-id>")
-    scope: Scope = args[0]  # type: ignore[assignment]
-    bundle = request_dream(_store(scope))
-    print(json.dumps(bundle, indent=2, ensure_ascii=False, sort_keys=True))
-    return 0
+        age = max(
+            0,
+            int((dt.datetime.now(dt.UTC) - oldest).total_seconds()),
+        )
+        reviews = max(record.review_count for record in deferred)
+        print(f"{scope}: oldest_deferred_age_seconds={age} max_review_count={reviews}")
+    if retired:
+        counts: dict[str, int] = {}
+        for record in retired:
+            counts[record.basis] = counts.get(record.basis, 0) + 1
+        print(f"{scope}: retirements={json.dumps(counts, sort_keys=True)}")
+    if generation is not None:
+        age = max(
+            0,
+            int(
+                (
+                    dt.datetime.now(dt.UTC)
+                    - dt.datetime.fromisoformat(generation.created_at)
+                ).total_seconds()
+            ),
+        )
+        print(f"{scope}: last_consolidation_age_seconds={age}")
+    if failure is not None:
+        print(
+            f"{scope}: latest_consolidation_failure={failure.get('at')} "
+            f"{failure.get('reason')}"
+        )
+
+
+def _status_legacy(scope: Scope, store: MemoryStore) -> None:
+    notes = store.snapshot()
+    counts: dict[str, int] = {}
+    for note in notes:
+        key = f"{note.kind}|{note.provenance}"
+        counts[key] = counts.get(key, 0) + 1
+    debt, due = dream_debt(store)
+    try:
+        current = load_current(store)
+        if current is not None:
+            validate_current_sources(store, current)
+        dream = (
+            "none"
+            if current is None
+            else f"{current.dream_id}@{current.source_count}"
+        )
+        dream_created = current.created_at if current else "none"
+        dream_projection = (
+            "none"
+            if current is None
+            else f"{len(current.items)}/{current.source_count}"
+        )
+        post_checkpoint: str | int = (
+            "none"
+            if current is None
+            else max(0, len(notes) - current.source_count)
+        )
+        dream_age = (
+            "none"
+            if current is None
+            else str(
+                max(
+                    0,
+                    int(
+                        (
+                            dt.datetime.now(dt.UTC)
+                            - dt.datetime.fromisoformat(current.created_at)
+                        ).total_seconds()
+                    ),
+                )
+            )
+        )
+    except DreamError as error:
+        dream = f"invalid:{error}"
+        dream_created = "invalid"
+        dream_projection = "invalid"
+        post_checkpoint = "invalid"
+        dream_age = "invalid"
+    try:
+        pending_count, retained_count = pending_dream_counts(store)
+    except (MemoryError, OSError) as error:
+        pending_count = f"invalid:{error}"
+        retained_count: str | int = f"invalid:{error}"
+    try:
+        failure_count, failure = dream_failure_summary(store)
+    except (MemoryError, OSError) as error:
+        failure = None
+        failure_count: str | int = f"invalid:{error}"
+    staged = (store.path / "consolidations" / "migration").is_dir()
+    print(
+        f"{scope}: path={store.path} schema=legacy raw_notes={len(notes)} "
+        f"nap_debt={store.nap_debt()} dream_debt={debt}/"
+        f"{DREAM_DUE_NOTES} dream_due={'yes' if due else 'no'} "
+        f"current_dream={dream} dream_created={dream_created} "
+        f"dream_age_seconds={dream_age} dream_projection={dream_projection} "
+        f"post_checkpoint={post_checkpoint} pending_dreams={pending_count} "
+        f"retained_dream_requests={retained_count} "
+        f"dream_failures={failure_count} "
+        f"migration={'staged' if staged else 'available'} "
+        f"bytes={store.bytes_used()}"
+    )
+    print(f"{scope}: metadata={json.dumps(counts, sort_keys=True)}")
+    if failure is not None:
+        print(
+            f"{scope}: latest_dream_failure={failure.get('at')} "
+            f"{failure.get('reason')}"
+        )
 
 
 def command_status(args: Sequence[str]) -> int:
@@ -543,6 +985,17 @@ def command_status(args: Sequence[str]) -> int:
     root = memory_root()
     print(f"root={root}")
     print(f"root_env={ROOT_ENV} ({'set' if os.environ.get(ROOT_ENV) else 'default'})")
+    config = config_path()
+    try:
+        policy = fetch_policy()
+        print(
+            f"config={config} ({'present' if config.exists() else 'absent'}) "
+            f"pruning={policy.catalog_pruning} "
+            f"self_catalog_target={policy.self_catalog_target} "
+            f"repo_catalog_target={policy.repo_catalog_target}"
+        )
+    except ConsolidationError as error:
+        print(f"config={config} config_error={error}")
     repo = current_repo()
     if repo is None:
         print("repo_identity=unavailable (not in a Git repository)")
@@ -558,80 +1011,34 @@ def command_status(args: Sequence[str]) -> int:
         print("initialized_scopes=none")
         return 0
     for scope, store in stores:
-        notes = store.snapshot()
-        counts: dict[str, int] = {}
-        for note in notes:
-            key = f"{note.kind}|{note.provenance}"
-            counts[key] = counts.get(key, 0) + 1
-        debt, due = dream_debt(store)
+        if store.uses_observation_log():
+            _status_current(scope, store)
+        else:
+            _status_legacy(scope, store)
+    return 0
+
+
+def command_migrate(args: Sequence[str]) -> int:
+    if len(args) == 2 and args[0] == "apply":
+        request_id = args[1]
         try:
-            current = load_current(store)
-            if current is not None:
-                validate_current_sources(store, current)
-            dream = (
-                "none"
-                if current is None
-                else f"{current.dream_id}@{current.source_count}"
-            )
-            dream_created = current.created_at if current else "none"
-            dream_projection = (
-                "none"
-                if current is None
-                else f"{len(current.items)}/{current.source_count}"
-            )
-            post_checkpoint: str | int = (
-                "none"
-                if current is None
-                else max(0, len(notes) - current.source_count)
-            )
-            dream_age = (
-                "none"
-                if current is None
-                else str(
-                    max(
-                        0,
-                        int(
-                            (
-                                dt.datetime.now(dt.UTC)
-                                - dt.datetime.fromisoformat(current.created_at)
-                            ).total_seconds()
-                        ),
-                    )
-                )
-            )
-        except DreamError as error:
-            dream = f"invalid:{error}"
-            dream_created = "invalid"
-            dream_projection = "invalid"
-            post_checkpoint = "invalid"
-            dream_age = "invalid"
-        try:
-            pending_count, retained_count = pending_dream_counts(store)
-        except (MemoryError, OSError) as error:
-            pending_count = f"invalid:{error}"
-            retained_count: str | int = f"invalid:{error}"
-        try:
-            failure_count, failure = dream_failure_summary(store)
-        except (MemoryError, OSError) as error:
-            failure = None
-            failure_count: str | int = f"invalid:{error}"
-        print(
-            f"{scope}: path={store.path} raw_notes={len(notes)} "
-            f"nap_debt={store.nap_debt()} dream_debt={debt}/"
-            f"{DREAM_DUE_NOTES} dream_due={'yes' if due else 'no'} "
-            f"current_dream={dream} dream_created={dream_created} "
-            f"dream_age_seconds={dream_age} dream_projection={dream_projection} "
-            f"post_checkpoint={post_checkpoint} pending_dreams={pending_count} "
-            f"retained_dream_requests={retained_count} "
-            f"dream_failures={failure_count} "
-            f"bytes={store.bytes_used()}"
-        )
-        print(f"{scope}: metadata={json.dumps(counts, sort_keys=True)}")
-        if failure is not None:
-            print(
-                f"{scope}: latest_dream_failure={failure.get('at')} "
-                f"{failure.get('reason')}"
-            )
+            value = json.load(sys.stdin)
+        except json.JSONDecodeError as error:
+            raise ConsolidationError(
+                f"malformed migration result JSON: {error}"
+            ) from error
+        if not isinstance(value, dict):
+            raise ConsolidationError("migration result must be a JSON object")
+        print(apply_migration(request_id, value))
+        return 0
+    if len(args) != 1 or args[0] not in ("self", "repo"):
+        raise MemoryError("migrate requires <self|repo> or apply <request-id>")
+    scope: Scope = args[0]  # type: ignore[assignment]
+    bundle = request_migration(_store(scope))
+    if bundle.get("protocol") == "memory-migration-complete":
+        print(f"migration committed for {scope}")
+        return 0
+    print(json.dumps(bundle, indent=2, ensure_ascii=False, sort_keys=True))
     return 0
 
 
@@ -643,8 +1050,11 @@ COMMANDS = {
     "wake": command_wake,
     "note": command_note,
     "recall": command_recall,
+    "candidates": command_candidates,
     "nap": command_nap,
     "dream": command_dream,
+    "consolidate": command_consolidate,
+    "migrate": command_migrate,
     "status": command_status,
 }
 
