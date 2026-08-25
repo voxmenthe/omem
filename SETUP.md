@@ -40,12 +40,12 @@ decides what becomes durable memory, nor runs maintenance.
 
 ## Choose the OMem working repository
 
-OMem raw notes are explicitly admitted, portable memory. OMem dreams and tree
-covers are derived, fallible projections; raw notes remain authoritative within
-OMem. Codex native memory is a separate host-owned, per-repository retrieval
-index. Neither system automatically imports or overwrites the other. Codex
-native-memory maintenance directories are not task repositories for OMem repo
-scope.
+OMem candidate observations are canonical evidence, not agent-usable memory.
+OMem integrated memories are the sole agent-facing catalog: consolidated,
+source-cited, and still fallible. Codex native memory is a separate host-owned,
+per-repository retrieval index. Neither system automatically imports or
+overwrites the other. Codex native-memory maintenance directories are not task
+repositories for OMem repo scope.
 
 Run `memory init`, `memory wake`, and other repo-scoped commands from the
 intended task repository. Recognized `~/.codex-state/repos/*/memories`,
@@ -119,7 +119,8 @@ Merge the contents of [`INSTRUCTIONS.md`](INSTRUCTIONS.md) into the target
 repository's root `AGENTS.md`.
 
 - The block tells the primary agent to wake memory at session start, record
-  selected durable notes, and perform due dreams.
+  candidate observations with their trigger context, and perform due
+  consolidations.
 - Put the same block in global agent instructions only if you want self memory
   available across every repository.
 - Merge the block with any existing instructions; do not overwrite unrelated
@@ -169,20 +170,21 @@ two read-only handlers in one global user hook source:
   the immediate post-compaction model request, including automatic mid-turn
   continuation.
 
-Prompt orientation is local, deterministic, model-free, and read-only. It does
-not initialize, repair, or mutate stores; create dreams; read transcripts; or
+Prompt orientation is local, deterministic, model-free, and read-only. It reads
+only the current integrated generation of each store, never the candidate log,
+so candidate volume does not change prompt latency or size. It does not
+initialize, repair, or mutate stores; run consolidations; read transcripts; or
 persist/log the prompt. It has one 500 ms in-process deadline and an 800-byte
-decoded checkpoint-plus-evidence budget. The supported ceiling is 10,000
-complete raw records per scope; an oversized or failing scope abstains without
-suppressing another coherent scope. A no-match or any contained provider
+decoded checkpoint-plus-evidence budget. Legacy stores that have not migrated
+keep the old 10,000-record raw ceiling. A no-match or any contained provider
 failure returns the canonical checkpoint alone.
 
 Use `memory orient "<query>"` for the same selection manually. It has a 2-second
-deadline and 4,096-byte evidence budget, but retains the same 10,000-record
-ceiling. `memory recall <scope> <regex>` remains the canonical-history fallback
-above the ceiling. Removing only the `UserPromptSubmit` handler disables
-automatic orientation without changing stored data, the manual command, or the
-compaction handler.
+deadline and 4,096-byte evidence budget. `memory recall <scope> <regex>`
+searches integrated claims and applicability conditions directly; on legacy
+stores it still searches raw notes. Removing only the `UserPromptSubmit` handler
+disables automatic orientation without changing stored data, the manual command,
+or the compaction handler.
 
 Codex does expose `PreCompact`, but its output contract cannot add developer
 context: plain stdout is ignored and JSON can warn or stop compaction. Blocking
@@ -252,7 +254,7 @@ checkpoint and resume the original task. In the same profile, exercise a
 missing command and malformed adapter input; both failures must remain visible
 without preventing compaction or normal continuation.
 
-The hook must remain read-only. `note`, `nap`, and `dream` stay under acting
+The hook must remain read-only. `note` and `consolidate` stay under acting
 primary-agent control.
 
 ## Run an optional post-hoc review

@@ -1,22 +1,24 @@
 # OMem
 
 OMem gives coding agents memory that lasts across sessions. Personal memories
-and project memories live in separate stores. Each raw note is saved once and
-stays unchanged. OMem builds summaries from those notes and marks every summary
-as something that may be wrong.
+and project memories live in separate stores. Agents record candidate
+observations — cheap, source-labeled notes with the context that triggered
+them — and an explicit consolidation step decides which of them become
+integrated memories: the only memories an agent ever sees. Both are append-only
+and auditable, and every integrated memory cites the observations that support
+it.
 
 OMem grew from Victor Taelin's
 [OptMem](https://github.com/VictorTaelin/OptMem). Both projects keep raw notes
 in a log without changing earlier entries. Both group older notes into shorter
 summaries while keeping recent notes in more detail. OptMem fits in one Python
 file, uses one active store, and lets you open an old summary with `zoom`. OMem
-adds separate personal and repository stores. It records where information came
-from, and each curated summary, called a dream, points back to the raw notes
-that support it. OMem also identifies repositories and can bring relevant
-memory into Codex through hooks with fixed limits. That extra work makes OMem
-larger. It keeps personal and project data apart and shows where memories came
-from. Codex continues when memory lookup fails. Opening summaries with `zoom`
-remains future work.
+separates capture from admission: a candidate observation is evidence, and only
+a consolidated, applicability-bearing integrated memory reaches an agent's
+prompt. OMem adds separate personal and repository stores, records where
+information came from, identifies repositories, and can bring relevant memory
+into Codex through hooks with fixed limits. Codex continues when memory lookup
+fails. Opening summaries with `zoom` remains future work.
 
 The CLI runs only when you or Codex call it. It uses the Python standard
 library and calls no model. Your repository files and agent instructions stay
@@ -72,8 +74,10 @@ Merge [`INSTRUCTIONS.md`](INSTRUCTIONS.md) into the target repository's
 session in that repository and confirm that it runs `memory init` and
 `memory wake`.
 
-The agent can now read memory at the start of a session. It decides what is
-useful enough to save with `memory note`.
+The agent can now read memory at the start of a session. It records candidate
+observations with `memory note ... --context ...` as it works, and it runs
+`memory consolidate` when status says consolidation is due or a correction
+should take effect immediately.
 
 ### 4. Enable the optional Codex hooks
 
@@ -111,62 +115,70 @@ multiple `CODEX_HOME` profiles, development setup, validation, and removal.
 memory init
 memory wake
 memory orient [--explain] "<query>"
-memory note <scope>:<kind>:<source> "<text>"
+memory note <scope>:<kind>:<source> --context "<trigger context>" "<candidate>"
 memory recall <scope> <regex>
-memory nap [scope]
-memory nap <scope> <lo>-<hi> "<summary>"
-memory dream <scope>
-memory dream apply <dream-id>  # result JSON on stdin
+memory consolidate <scope>
+memory consolidate apply <request-id>  # result JSON on stdin
+memory migrate <scope>
+memory migrate apply <request-id>      # result JSON on stdin
 memory status
+
+# Maintenance audit (unintegrated evidence, not usable memory)
+memory candidates <scope> <regex>
 
 # Optional integrations
 memory codex-hook               # hook event JSON on stdin
 memory review-sessions <session-path> [<session-path> ...]
 ```
 
-Every saved note names its scope. Use `self` for personal memory and `repo` for
-memory tied to the current repository.
+Every saved candidate names its scope. Use `self` for personal memory and
+`repo` for memory tied to the current repository.
 
 | Scope  | Kinds                                          |
 | ------ | ---------------------------------------------- |
 | `self` | `fact`, `preference`, `episode`                |
 | `repo` | `fact`, `invariant`, `procedure`, `preference` |
 
-Each note has a source label. Use `user` for something the user said,
-`observed` for something the agent checked, and `inferred` for a conclusion. A
-dream item can use `mixed` when its sources have different labels. Each note is
-one trimmed line. The encoded kind, source label, and text can use at most 280
-UTF-8 bytes.
+Each candidate has a source label. Use `user` for something the user said,
+`observed` for something the agent checked, and `inferred` for a conclusion. An
+integrated item can use `mixed` when its cited observations have different
+labels; the apply step derives the label from the citations. Candidate text is
+one trimmed line of at most 280 UTF-8 bytes; the trigger context is one trimmed
+line of at most 768 UTF-8 bytes.
 
 Examples:
 
 ```sh
 memory note repo:invariant:observed \
-  "Raw notes are the source of truth for memory"
+  --context "a partial write corrupted the fixture store" \
+  "Store writes repair a torn tail before appending"
 memory note self:preference:user \
+  --context "user asked for the third time" \
   "Prefer evidence-backed status updates"
-memory recall repo 'source of truth|append-only'
+memory recall repo 'torn tail|repair'
 memory status
 ```
 
-Save information that will help with a later decision. Keep secrets,
-credentials, health or financial data, private information about other people,
-and short-lived task state out of memory. [`INSTRUCTIONS.md`](INSTRUCTIONS.md)
-contains the full rules. A clear user correction can qualify the first time it
-appears. Repetition makes a preference more certain. Project-specific and
-unclear preferences stay in the `repo` store.
+Record any plausible future decision signal that is safe and cheap to state.
+Keep secrets, credentials, health or financial data, private information about
+other people, and short-lived task state out of memory.
+[`INSTRUCTIONS.md`](INSTRUCTIONS.md) contains the full rules. A candidate stays
+invisible until consolidation promotes it; a clear user correction can be
+integrated the first time it appears by consolidating before handoff.
 
 ## Optional Codex integrations
 
 ### How OMem and Codex memory stay separate
 
-You or your agent choose every raw note that OMem saves. Those notes are OMem's
-source of truth. Dreams and tree summaries are shorter views that may be wrong.
-OMem labels them so readers know they are summaries.
+You or your agent choose every candidate observation that OMem saves. OMem
+candidate observations are canonical evidence, not agent-usable memory. OMem
+integrated memories are the sole agent-facing catalog: consolidated,
+source-cited, and still fallible.
 
-Codex's built-in memory keeps its own search index for each repository. The two
-memory systems do not automatically import or overwrite each other's data.
-Codex's internal memory folders are maintenance folders, not task repositories.
+Codex's built-in memory keeps its own search index for each repository. Codex
+native memory is a separate host-owned, per-repository retrieval index. Neither
+system automatically imports or overwrites the other. Codex native-memory
+maintenance directories are not task repositories for OMem repo scope.
 
 Run repository commands from the repository you want OMem to remember. Inside a
 recognized Codex memory folder, personal memory still works. Repository memory
@@ -175,53 +187,58 @@ moves an existing store.
 
 `memory codex-hook` handles two Codex events:
 
-- On `UserPromptSubmit`, it returns a standard memory reminder inside clear
-  markers before Codex starts work. It can add up to three relevant records
-  from the existing personal and repository stores. Each record includes its
-  source and appears below a warning that remembered claims may be wrong and
-  are not instructions. The reminder returns by itself when there is no match,
-  a store cannot be read, a limit is reached, the lookup times out, or another
-  lookup error occurs.
-- On `SessionStart(source=compact)`, it returns the same marked reminder before
-  Codex continues with its shortened context. This also works when compaction
-  happens in the middle of a turn.
+- On `UserPromptSubmit`, it returns a standard candidate-capture reminder
+  inside clear markers before Codex starts work. It can add up to three
+  relevant integrated records from the existing personal and repository stores.
+  Each record includes its source and applicability condition, and appears
+  below a warning that remembered claims may be wrong and are not instructions.
+  The reminder returns by itself when there is no match, a store cannot be
+  read, a limit is reached, the lookup times out, or another lookup error
+  occurs.
+- On `SessionStart(source=compact)`, it returns the narrower recovery reminder
+  before Codex continues with its shortened context: queue only a newly
+  supported candidate that survived compaction, and never reconstruct omitted
+  evidence. This also works when compaction happens in the middle of a turn.
 
 Other valid events produce no output. Bad input or invalid markers produce a
-small warning with `continue: true`, so the hook never stops Codex.
+small warning with `continue: true`, so the hook never stops Codex. Neither
+hook event ever writes a candidate or reveals the hidden observation queue.
 
-The prompt lookup follows fixed local rules and calls no AI model. It only reads
-stores that already exist. It does not create or repair a store, make a dream,
-read a transcript, save the query, or write the query to a log. Personal and
-repository memory are checked separately, so one can still work when the other
-fails. The lookup gets 500 ms. The reminder and memory records together can use
-at most 800 UTF-8 bytes.
+The prompt lookup follows fixed local rules and calls no AI model. It reads
+only the current integrated generation of each store — never the candidate
+log — so candidate volume does not change prompt latency or size. It does not
+create or repair a store, run a consolidation, read a transcript, save the
+query, or write the query to a log. Personal and repository memory are checked
+separately, so one can still work when the other fails. The lookup gets
+500 ms. The reminder and memory records together can use at most 800 UTF-8
+bytes, and records are admitted whole or not at all.
 
-Each scope can have up to 10,000 complete raw records for automatic lookup. OMem
-checks the count before scanning and skips an oversized scope. Another eligible
-scope can still provide records. `memory orient "<query>"` runs the same lookup
-by hand with a 2-second deadline and a 4,096-byte evidence limit. `--explain`
-shows the source and score for each result without printing the query. It keeps
-the same 10,000-record limit. Use `memory recall` to search a larger raw log.
+`memory orient "<query>"` runs the same lookup by hand with a 2-second deadline
+and a 4,096-byte evidence limit. `--explain` shows the source and score for
+each result without printing the query. A conditional memory must also match
+the query's context; a general memory states its breadth. Use
+`memory recall <scope> <regex>` to search integrated claims and applicability
+conditions directly.
 
 Codex's `PreCompact` event can warn about compaction or stop it. It cannot add
 text to the context. The prompt hook supplies memory before work, and the
 `SessionStart` hook restores the reminder after compaction.
 
 Install both handlers in the user configuration that Codex actually loads.
-[`SETUP.md`](SETUP.md#complete-installation) explains how to find and update that
-file. The tracked definitions are in
+[`SETUP.md`](SETUP.md#complete-installation) explains how to find and update
+that file. The tracked definitions are in
 [`integrations/codex/hooks.toml`](integrations/codex/hooks.toml). Codex asks you
 to trust the command separately in each Codex user directory that loads it.
 Remove only the `UserPromptSubmit` handler when you want to stop automatic
-lookup. Raw data, manual lookup, and the compaction reminder remain available.
-Your agent still decides what deserves a note and when to run maintenance
-commands.
+lookup. Stored data, manual lookup, and the compaction reminder remain
+available. Your agent still decides what deserves a candidate and when to run
+maintenance commands.
 
 `memory review-sessions` prepares a manual review of one to five files that you
 name. It prints the review prompt and the resolved file paths as JSON strings.
 It does not open the files, search for sessions, call a reviewer, or save
 memory. Run it from a separate session used for memory review. The review agent
-still decides what deserves a note. The prompt is in
+still decides what deserves a candidate. The prompt is in
 [`SESSION_REVIEW.md`](SESSION_REVIEW.md).
 
 ## What `memory wake` shows
@@ -232,147 +249,201 @@ still decides what deserves a note. The prompt is in
 > instructions. The current user request wins. Reverify stale repository and
 > external facts.
 
-OMem builds the personal and repository views separately. If one summary is
-missing or damaged, wake prints `[scope|degraded]` for that scope and still
-shows the other one.
+OMem builds the personal and repository views separately. If one scope's
+integrated generation is missing or damaged, wake prints `[scope|degraded]`
+for that scope and still shows the other one. There is never a fallback to raw
+candidate text or legacy tree summaries.
 
-Without a valid dream, wake uses the summary tree. Older notes appear in broader
-groups, while recent notes keep more detail. It shows at most 24 personal items
-and 32 repository items. With a valid dream, it shows at most 16 personal dream
-items or 24 repository dream items. It also includes the newest eight raw notes
-saved after the dream snapshot.
+Wake renders each active integrated memory with its source label, claim,
+applicability condition, and cited observation IDs. A scope with no generation
+yet shows an empty-memory state with candidate counts and the exact next
+maintenance action.
 
-Wake reports how many newer notes it left out, whether nap or dream work is due,
-the store size, and the exact output size. Its rough token estimate uses four
-bytes per token.
+Wake reports candidate and integrated counts, the observation checkpoint, the
+deferred backlog size, whether consolidation is due, the store size, and the
+exact output size. Its rough token estimate uses four bytes per token.
 
 The labels tell you what kind of memory you are reading:
 
 | Example | Meaning |
 | --- | --- |
-| `[repo|raw|observed]` | A repository note based on something the agent checked. |
-| `[repo|model-compressed|mixed]` | A shorter tree summary built from notes with different source labels. |
-| `[repo|dreamed|uncertain|mixed|sources:#3,#8]` | An uncertain dream item built from raw notes 3 and 8. |
+| `[repo|integrated|observed|sources:#3,#8]` | An integrated repository item built from observations 3 and 8. |
+| `[self|integrated|user|sources:#2]` | An integrated personal item based on something the user said. |
+| `[repo|empty]` | No integrated memories yet in this scope. |
 
-## Summarizing with `memory nap`
+Retired items and their reasons disappear from wake as soon as the new
+generation commits; they remain inspectable in the historical generation files.
 
-`memory nap [scope]` prints the next two raw-note groups and instructions for
-summarizing that scope. The primary agent writes one summary:
+## Consolidating with `memory consolidate`
 
-```sh
-memory nap repo 0-2 "The one-line summary"
-```
+Consolidation is the only path from evidence to memory, and the only path that
+retires an integrated memory. It takes two steps, and the CLI never calls a
+model:
 
-The range `0-2` includes notes 0 and 1. It stops before note 2. The summary goes
-into a cache and leaves the raw notes unchanged. It keeps the original source
-label when every note in the range has the same label. Otherwise it uses
-`mixed`.
-
-## Building a dream with `memory dream`
-
-Dreaming builds a shorter view whose items point back to the raw notes that
-support them. It takes two steps:
-
-1. `memory dream repo` copies the current raw notes from 0 through `T-1` into a
-   pending request. It prints a JSON bundle with those notes, the instructions,
-   the item limit, an ID for this store, a fingerprint of the contents, and the
-   required result shape. OMem releases the store lock before a model works on
-   the request.
-2. Send the model's JSON result to `memory dream apply <dream-id>` through
-   standard input.
+1. `memory consolidate repo` saves and prints a bounded JSON request: the
+   complete current integrated set with its maintenance rationale, the
+   observations those items cite, the deferred backlog with apply-derived
+   review history, and the next contiguous batch of new observations. At most
+   256 candidate observations are offered per request, so total history can
+   grow without bound while each request stays small.
+2. Send the model's JSON result to `memory consolidate apply <request-id>`
+   through standard input.
 
 Result shape:
 
 ```json
 {
-  "version": 1,
   "scope": "repo",
+  "base_generation": null,
   "source_count": 37,
+  "policy_digest": "<sha256 from the request>",
   "items": [
     {
       "kind": "procedure",
-      "standing": "current",
       "provenance": "observed",
       "text": "Run the narrow unit suite before broader checks.",
+      "applicability": {
+        "mode": "conditional",
+        "when": "Changing storage or retrieval behavior"
+      },
+      "promotion_reason": "Two independent failures; reuse likely.",
       "source_ids": [12, 31]
     }
-  ]
+  ],
+  "deferred": [{"source_id": 30, "reason": "Needs an independent occurrence"}],
+  "rejected": [{"source_id": 29, "reason": "One-off status narration"}],
+  "retired": []
 }
 ```
 
-The JSON field named `provenance` holds the source label described above.
+The JSON field named `provenance` holds the source label described above; the
+apply step derives it from the cited observations and rejects an unsupported
+label.
 
-OMem checks the version, scope, note count, item limit, kinds, standing, source
-labels, text length, and raw note IDs. Every accepted result gets its own JSON
-file. The small `dreams/current.json` file selects which result is current. OMem
-replaces that file in one operation and keeps older results.
+OMem checks the scope, base generation, observation checkpoint, policy digest,
+item budget, kinds, applicability, text limits, and citation IDs. Every offered
+observation must be promoted, deferred, or rejected exactly once; every current
+item must be retained unchanged or retired once with a bounded reason. Every
+accepted result gets its own immutable generation file, enriched with a digest
+of each cited observation. The small `consolidations/current.json` file selects
+which generation is current. OMem replaces that file in one operation and keeps
+older generations forever.
 
-Sending the same content twice for one prompt version is safe and makes no extra
-change. OMem marks a request as `stale` when it uses an older set of raw notes or
-an older prompt version. It marks a result as a `conflict` when the same raw-note
-snapshot and prompt version already have different content. A newer supported
-prompt version can rebuild a dream from the same notes. A failed apply leaves
-the current pointer unchanged and reports the failure in the command output and
-`memory status`. Raw notes saved after `T` stay in a separate, clearly labeled
-group.
+Sending the same result twice is safe and makes no extra change. A result is
+stale when the current generation or the effective pruning policy changed while
+the model was judging it; stale or conflicting applies leave the current
+pointer unchanged and record a bounded failure reason in `memory status`.
+Observations saved after the request stay as clearly counted later debt.
 
-Every dream starts from raw notes. It never uses an earlier dream or tree
-summary as input. Prompt version 2 asks for the smallest useful set of current
-information. It combines related notes, follows later corrections, and leaves
-out old or easy-to-find details. The item limit is a maximum. OMem refuses a
-snapshot with more than 256 raw notes and keeps the current dream unchanged.
-Supporting larger snapshots needs a separate design decision. A new dream is
-due after eight notes have been saved since the last snapshot. Refresh sooner
-when a new note directly corrects a current dream item.
+Routine consolidation comes due after twelve new candidates. A strong,
+well-contextualized correction should not wait: consolidate immediately. A
+deferred backlog by itself does not retrigger routine consolidation.
+
+### Retirement and pruning profiles
+
+Three cleanup decisions stay separate:
+
+- **Safety retirement** of a contradicted, superseded, inapplicable, or
+  misleading integrated item is mandatory in every profile and cites current
+  evidence. An unresolved conflict leaves no active item.
+- **Inferred-staleness retirement** of a still-valid item needs an explicit
+  pruning profile and affirmative item-specific evidence.
+- **Capacity retirement** additionally requires the active catalog to exceed
+  its configured target.
+
+One optional root config file controls this —
+`$MEMORY_V0_DIR/config.toml` (or `~/.memory-v0/config.toml`):
+
+```toml
+[consolidation]
+catalog_pruning = "off"       # off | conservative | balanced | aggressive
+self_catalog_target = 16
+repo_catalog_target = 24
+```
+
+An absent file means `off` with 16/24 targets. `memory init` never creates the
+file. Profiles raise how much affirmative evidence suffices; age or a review
+count never acts as an automatic deletion rule under any profile. Unknown keys,
+bad types, unknown profiles, and out-of-range targets fail consolidation with a
+clear error and appear in `memory status`; they never break reads of an already
+valid generation. Nothing is physically deleted: retirement changes eligibility,
+and the evidence stays in the observation log and historical generations.
+
+## Migrating a legacy store
+
+Stores created before consolidation — raw `LOG.txt` notes, summary trees, and
+dreams — keep their legacy behavior until you migrate them explicitly:
+
+1. `memory migrate repo` snapshots the legacy log into a private staging
+   directory and prints a bootstrap consolidation request. Legacy notes keep
+   their IDs; their trigger context is recorded as explicitly unknown rather
+   than invented.
+2. Apply each printed batch with `memory migrate apply <request-id>`. Stores
+   with more than 256 notes advance through several bounded batches. Ordinary
+   legacy reads and writes continue unchanged throughout.
+3. The final apply validates everything and commits atomically: the staged
+   observation log, generations, and current pointer move into place, and the
+   observation log — the activation marker — is written last. `LOG.txt`,
+   `TREE/`, and `dreams/` remain as a read-only archive.
+
+Deleting `<store>/consolidations/migration` abandons a staged migration safely.
+A legacy write during staging marks the staging stale, and the next
+`memory migrate` rebuilds it. Observations written after migration are not
+visible to an old binary; do not run mixed-version writers against one store,
+and do not downgrade a store after migrating it.
 
 ## Storage and failure boundaries
 
 ```text
 ~/.memory-v0/
+  config.toml                      # optional consolidation policy
   self/
-    LOG.txt
-    TREE/
-    dreams/{pending,generations,current.json}
+    OBSERVATIONS.log               # fixed-width candidate records
+    consolidations/{pending,generations,current.json,failures.jsonl}
+    LOG.txt TREE/ dreams/          # legacy archive, after migration only
   repos/
     <normalized-origin-and-digest>/
       identity.json
-      LOG.txt
-      TREE/
-      dreams/{pending,generations,current.json}
+      OBSERVATIONS.log
+      consolidations/{pending,generations,current.json,failures.jsonl}
 ```
 
 OMem creates directories with mode `0700` and managed files with mode `0600`.
-Raw and tree records have a fixed width. OMem assigns each ID while holding an
-`fcntl` file lock. It flushes every append and calls `fsync` to send it to disk.
-If a previous write left an incomplete final record, OMem repairs that tail
-before the next append.
+Observation records have a fixed width and carry canonical JSON. OMem assigns
+each ID while holding an `fcntl` file lock. It flushes every append and calls
+`fsync` to send it to disk. If a previous write left an incomplete final
+record, OMem ignores the tail on reads and repairs it before the next append.
+Concurrent writers receive unique contiguous IDs.
 
 OMem names a repository store from its normalized Git `origin`. A repository
 without an origin uses the real path of its Git root. Clones and worktrees with
 the same origin share one store. `memory status` shows the resolved identity and
 path.
 
-Status also shows `dream_projection=<items>/<sources>`, the number of raw notes
-saved after the dream snapshot, dreams waiting to be applied, retained dream
-requests, failed dreams, and the latest failure reason. Retained requests and
-older dream files are history. They do not mean maintenance is due.
+Status also shows the candidate count, integrated count, observation
+checkpoint, deferred and rejected counts, retirement counts by basis, the
+effective pruning profile and catalog target, pending consolidation requests,
+failed applies with the latest bounded reason, and for legacy scopes whether a
+migration is available or staged. Retained requests and older generations are
+history. They do not mean maintenance is due.
 
-A damaged store affects one memory scope. Damage to `dreams/current.json`
-affects only that scope's summary. Removing OMem leaves normal repository and
-Codex work unchanged.
+A damaged store affects one memory scope. Damage to `consolidations/current.json`
+affects only that scope's integrated view; it never causes a fallback to raw
+candidates. Removing OMem leaves normal repository and Codex work unchanged.
 
 ## Comparing memory systems
 
 Give each test session memory from one system. Put native Codex memory in one
 group and OMem hook output in another. Separate groups make it possible to tell
 which system helped. OMem needs local storage and occasional maintenance
-commands. In return, you can inspect every raw note, keep personal and project
-notes apart, see where each item came from, follow dream items back to raw note
-IDs, and remove summaries without losing raw notes.
+commands. In return, you can inspect every candidate observation, keep personal
+and project memory apart, see where each item came from, follow integrated
+items back to observation IDs, and retire items without losing evidence.
 
 OptMem's `memo zoom <lo>-<hi>` opens a compressed tree node and shows its two
-children. OMem currently searches raw notes with scoped `memory recall`.
-Opening a summary node into its children remains future work.
+children. OMem currently searches integrated memories with scoped
+`memory recall` and audits the hidden queue with `memory candidates`. Opening a
+summary node into its children remains future work.
 
 ## Validation
 
@@ -387,13 +458,13 @@ uv run python benchmarks/orientation_latency.py
 
 The unit suite checks the storage and hook promises described above. This
 includes simultaneous writes, incomplete file tails, separate scope failures,
-invalid dream results, lookup limits, unsafe input, output size, compaction, and
-session review input.
+invalid consolidation results, stale and conflicting applies, migration
+interruption and commit, lookup limits, unsafe input, output size, compaction,
+and session review input.
 
 The semantic example file provides repeatable input. The lookup trials check
-which notes OMem selects. The latency benchmark checks the time limits. These
-controlled checks support the current 10,000-record ceiling. Test with real
-Codex sessions before relying on OMem for important work.
+which memories OMem selects. The latency benchmark checks the time limits.
+Test with real Codex sessions before relying on OMem for important work.
 
 ## Removal
 
