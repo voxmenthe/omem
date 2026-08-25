@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure Release A orientation latency on structurally valid synthetic stores."""
+"""Measure orientation latency on structurally valid synthetic stores."""
 
 import argparse
 import json
@@ -15,8 +15,9 @@ from pathlib import Path
 from typing import Any
 
 from omem import orientation
+from omem.consolidation import apply_consolidation, request_consolidation
 from omem.dreams import apply_dream, request_dream
-from omem.layout import current_repo, scope_path
+from omem.layout import current_repo, scope_path, secure_directory
 from omem.orientation import (
     OrientationRequest,
     _query_evidence,
@@ -26,7 +27,7 @@ from omem.orientation import (
     _select_candidates,
     fetch_orientation,
 )
-from omem.store import LOG_RECORD_BYTES, MemoryStore, _pad
+from omem.store import LOG_RECORD_BYTES, OBSERVATION_RECORD_BYTES, MemoryStore, _pad
 
 QUERY = "target-marker"
 
@@ -41,6 +42,17 @@ def _git(repo: Path, *args: str) -> None:
     )
 
 
+def _legacy_layout(store: MemoryStore) -> None:
+    """Create the legacy raw-note layout for the legacy hot path."""
+
+    secure_directory(store.path)
+    secure_directory(store.tree_path)
+    secure_directory(store.path / "dreams" / "pending")
+    secure_directory(store.path / "dreams" / "generations")
+    store.log_path.touch(mode=0o600)
+    store.lock_path.touch(mode=0o600)
+
+
 def _write_records(store: MemoryStore, start: int, stop: int) -> None:
     batch = bytearray()
     with store.log_path.open("ab") as handle:
@@ -52,6 +64,34 @@ def _write_records(store: MemoryStore, start: int, stop: int) -> None:
             )
             batch.extend(_pad(line, LOG_RECORD_BYTES))
             if len(batch) >= LOG_RECORD_BYTES * 1024:
+                handle.write(batch)
+                batch.clear()
+        if batch:
+            handle.write(batch)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _write_observations(store: MemoryStore, count: int) -> None:
+    """Append candidate observations directly; the log is the current layout."""
+
+    batch = bytearray()
+    with store.observations_path.open("ab") as handle:
+        for observation_id in range(count):
+            marker = " target-marker" if observation_id == 0 else ""
+            record = {
+                "id": observation_id,
+                "recorded_at": "2026-08-10T00:00:00+00:00",
+                "kind": "fact",
+                "provenance": "observed",
+                "text": f"synthetic record {observation_id}{marker}",
+                "trigger_context": "synthetic benchmark",
+            }
+            line = json.dumps(
+                record, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            )
+            batch.extend(_pad(line, OBSERVATION_RECORD_BYTES))
+            if len(batch) >= OBSERVATION_RECORD_BYTES * 512:
                 handle.write(batch)
                 batch.clear()
         if batch:
@@ -81,7 +121,38 @@ def _install_valid_dream(store: MemoryStore) -> None:
     )
 
 
-def _prepare(records: int, with_dream: bool) -> tuple[tempfile.TemporaryDirectory, Path, list[MemoryStore], str | None]:
+def _install_integrated_generation(store: MemoryStore) -> None:
+    bundle = request_consolidation(store)
+    apply_consolidation(
+        bundle["request_id"],
+        {
+            "scope": store.scope,
+            "base_generation": bundle["base_generation"],
+            "source_count": bundle["source_count"],
+            "policy_digest": bundle["policy_digest"],
+            "items": [
+                {
+                    "kind": "fact",
+                    "provenance": "observed",
+                    "text": "target-marker is retained for benchmark selection",
+                    "applicability": {"mode": "general", "when": "Benchmarking"},
+                    "promotion_reason": "synthetic benchmark fixture",
+                    "source_ids": [0],
+                }
+            ],
+            "deferred": [],
+            "rejected": [
+                {"source_id": index, "reason": "synthetic noise"}
+                for index in range(1, bundle["source_count"])
+            ],
+            "retired": [],
+        },
+    )
+
+
+def _prepare(
+    records: int, layout: str, with_dream: bool
+) -> tuple[tempfile.TemporaryDirectory, Path, list[MemoryStore], str | None]:
     temporary = tempfile.TemporaryDirectory()
     base = Path(temporary.name)
     root = base / "memory"
@@ -99,7 +170,12 @@ def _prepare(records: int, with_dream: bool) -> tuple[tempfile.TemporaryDirector
         MemoryStore(scope_path("repo", identity), "repo"),
     ]
     for store in stores:
-        store.initialize()
+        if layout == "current":
+            store.initialize()
+            _write_observations(store, records)
+            _install_integrated_generation(store)
+            continue
+        _legacy_layout(store)
         checkpoint = min(records, 256) if with_dream else 0
         if checkpoint:
             _write_records(store, 0, checkpoint)
@@ -115,7 +191,7 @@ def _restore_root(prior_root: str | None) -> None:
         os.environ["MEMORY_V0_DIR"] = prior_root
 
 
-def _trial(repo: Path, stores: list[MemoryStore]) -> dict[str, Any]:
+def _trial(repo: Path, stores: list[MemoryStore], layout: str) -> dict[str, Any]:
     query = _query_evidence(QUERY)
     if query is None:
         raise RuntimeError("benchmark query unexpectedly exceeded selector bounds")
@@ -140,6 +216,19 @@ def _trial(repo: Path, stores: list[MemoryStore]) -> dict[str, Any]:
     repo_ms = (time.perf_counter() - started) * 1000
     if resolved is None:
         raise RuntimeError("benchmark repository resolution failed")
+
+    if layout == "current":
+        # The current hot path never scans the candidate corpus: the
+        # integrated generation and bounded citation seeks are the whole input.
+        return {
+            "repo_resolution_ms": repo_ms,
+            "capture_ms": None,
+            "scan_selection_ms": None,
+            "encoding_ms": None,
+            "total_ms": total_ms,
+            "total_reason": result.abstention_reason,
+            "rendered_bytes": len(result.rendered.encode("utf-8")),
+        }
 
     deadline = time.monotonic() + 5
     captures = []
@@ -194,7 +283,11 @@ def _percentiles(samples: list[dict[str, Any]]) -> dict[str, Any]:
         "encoding_ms",
         "total_ms",
     ):
-        values = sorted(float(sample[field]) for sample in samples)
+        values = sorted(
+            float(sample[field]) for sample in samples if sample[field] is not None
+        )
+        if not values:
+            continue
         p95_index = max(0, math.ceil(len(values) * 0.95) - 1)
         output[field] = {
             "p50": round(statistics.median(values), 3),
@@ -219,22 +312,28 @@ def main() -> int:
     orientation.AUTOMATIC_RECORD_CEILING = max(args.sizes)
     scenarios = []
     for records in args.sizes:
-        for with_dream in (False, True):
+        for layout, with_dream in (
+            ("legacy", False),
+            ("legacy", True),
+            ("current", False),
+        ):
             print(
-                f"benchmark records_per_scope={records} dream={with_dream}",
+                f"benchmark records_per_scope={records} layout={layout} "
+                f"dream={with_dream}",
                 file=sys.stderr,
                 flush=True,
             )
-            temporary, repo, stores, prior_root = _prepare(records, with_dream)
+            temporary, repo, stores, prior_root = _prepare(records, layout, with_dream)
             try:
-                cold_proxy = _trial(repo, stores)
-                warm = [_trial(repo, stores) for _ in range(args.runs)]
+                cold_proxy = _trial(repo, stores, layout)
+                warm = [_trial(repo, stores, layout) for _ in range(args.runs)]
             finally:
                 _restore_root(prior_root)
                 temporary.cleanup()
             scenarios.append(
                 {
                     "records_per_scope": records,
+                    "layout": layout,
                     "valid_dream": with_dream,
                     "cold_first_pass_proxy": {
                         key: round(value, 3) if isinstance(value, float) else value

@@ -24,6 +24,8 @@ def main() -> int:
                 raw_ids=tuple(value["raw_ids"]),
                 recency=value["recency"],
                 standing=value.get("standing"),
+                applicability_mode=value.get("applicability_mode"),
+                applies_when=value.get("applies_when"),
             )
             for value in case["candidates"]
         )

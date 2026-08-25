@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from omem.consolidation import apply_consolidation, request_consolidation
 from omem.dreams import apply_dream, request_dream
 from omem.layout import current_repo, scope_path
 from omem.models import DreamArtifact
@@ -22,10 +23,143 @@ from omem.orientation import (
 )
 from omem.store import MemoryStore
 
-from .helpers import make_repo
+from .helpers import make_legacy_store, make_repo
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "orientation_cases.json"
+
+
+class IntegratedOrientationTest(unittest.TestCase):
+    """Orientation over the current store format: integrated-only authority."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.base = Path(self.temp.name)
+        self.root = self.base / "memory"
+        self.repo = make_repo(
+            self.base / "repo", "git@example.test:team/orientation.git"
+        )
+        self.environment = mock.patch.dict(
+            os.environ, {"MEMORY_V0_DIR": str(self.root)}
+        )
+        self.environment.start()
+        self.self_store = MemoryStore(scope_path("self"), "self")
+        self.self_store.initialize()
+        identity = current_repo(self.repo)
+        self.assertIsNotNone(identity)
+        self.repo_store = MemoryStore(scope_path("repo", identity), "repo")
+        self.repo_store.initialize()
+
+    def tearDown(self) -> None:
+        self.environment.stop()
+        self.temp.cleanup()
+
+    def _request(self, query: str, *, max_bytes: int = 4096) -> OrientationRequest:
+        return OrientationRequest(
+            query=query,
+            cwd=self.repo,
+            max_evidence_bytes=max_bytes,
+            max_items=3,
+            deadline=time.monotonic() + 1,
+        )
+
+    def _integrate(self, store: MemoryStore, text: str, source_ids, when: str) -> None:
+        bundle = request_consolidation(store)
+        apply_consolidation(
+            bundle["request_id"],
+            {
+                "scope": store.scope,
+                "base_generation": bundle["base_generation"],
+                "source_count": bundle["source_count"],
+                "policy_digest": bundle["policy_digest"],
+                "items": [
+                    {
+                        "kind": "procedure" if store.scope == "repo" else "preference",
+                        "provenance": "observed" if store.scope == "repo" else "user",
+                        "text": text,
+                        "applicability": {"mode": "general", "when": when},
+                        "promotion_reason": "durable and reusable",
+                        "source_ids": sorted(source_ids),
+                    }
+                ],
+                "deferred": [],
+                "rejected": [],
+                "retired": [],
+            },
+        )
+
+    def test_candidates_are_invisible_until_integrated(self) -> None:
+        self.repo_store.append_observation(
+            "procedure",
+            "observed",
+            "release-procedure uses bounded changes",
+            "trigger-sentinel-context",
+        )
+        result = fetch_orientation(
+            self._request("release-procedure bounded changes")
+        )
+        self.assertEqual(result.items, ())
+        self.assertEqual(result.abstention_reason, "no_match")
+
+        self._integrate(
+            self.repo_store,
+            "release-procedure uses bounded changes",
+            [0],
+            "Preparing a release",
+        )
+        result = fetch_orientation(
+            self._request("release-procedure bounded changes")
+        )
+        self.assertEqual(len(result.items), 1)
+        self.assertTrue(result.items[0].source.startswith("repo:integrated:"))
+        self.assertIn("applies_when", result.rendered)
+        self.assertNotIn("trigger-sentinel-context", result.rendered)
+
+    def test_post_checkpoint_candidates_do_not_change_results(self) -> None:
+        self.repo_store.append_observation(
+            "procedure", "observed", "retry-limit is 4", "first failure"
+        )
+        self._integrate(self.repo_store, "retry-limit is 4", [0], "Configuring retry behavior")
+        before = fetch_orientation(self._request("retry-limit"))
+        for index in range(50):
+            self.repo_store.append_observation(
+                "procedure", "observed", f"retry-limit noise {index}", "same incident"
+            )
+        after = fetch_orientation(self._request("retry-limit"))
+        self.assertEqual(before.rendered, after.rendered)
+        self.assertNotIn("noise", after.rendered)
+
+    def test_tampered_citations_suppress_without_candidate_fallback(self) -> None:
+        self.repo_store.append_observation(
+            "procedure", "observed", "retry-limit is 4", "first failure"
+        )
+        self._integrate(self.repo_store, "retry-limit is 4", [0], "Configuring retry behavior")
+        raw = self.repo_store.observations_path.read_bytes()
+        self.repo_store.observations_path.write_bytes(
+            raw.replace(b"retry-limit is 4", b"retry-limit is 8")
+        )
+
+        result = fetch_orientation(self._request("retry-limit"))
+
+        self.assertEqual(result.items, ())
+        self.assertEqual(result.abstention_reason, "no_match")
+
+    def test_missing_generation_in_one_scope_does_not_block_the_other(self) -> None:
+        self.self_store.append_observation(
+            "preference", "user", "Prefer bounded changes", "stated twice"
+        )
+        self._integrate(
+            self.self_store,
+            "Prefer bounded changes",
+            [0],
+            "Across repositories when following the user's working preferences",
+        )
+        self.repo_store.append_observation(
+            "procedure", "observed", "bounded changes procedure", "work"
+        )
+        result = fetch_orientation(self._request("prefer bounded changes"))
+        self.assertEqual(len(result.items), 1)
+        self.assertTrue(result.items[0].source.startswith("self:integrated:"))
 
 
 class SelectorFixtureTest(unittest.TestCase):
@@ -43,6 +177,8 @@ class SelectorFixtureTest(unittest.TestCase):
                     raw_ids=tuple(value["raw_ids"]),
                     recency=value["recency"],
                     standing=value.get("standing"),
+                    applicability_mode=value.get("applicability_mode"),
+                    applies_when=value.get("applies_when"),
                 )
                 for value in case["candidates"]
             )
@@ -124,12 +260,10 @@ class OrientationServiceTest(unittest.TestCase):
             os.environ, {"MEMORY_V0_DIR": str(self.root)}
         )
         self.environment.start()
-        self.self_store = MemoryStore(scope_path("self"), "self")
-        self.self_store.initialize()
+        self.self_store = make_legacy_store(scope_path("self"), "self")
         identity = current_repo(self.repo)
         self.assertIsNotNone(identity)
-        self.repo_store = MemoryStore(scope_path("repo", identity), "repo")
-        self.repo_store.initialize()
+        self.repo_store = make_legacy_store(scope_path("repo", identity), "repo")
 
     def tearDown(self) -> None:
         self.environment.stop()
