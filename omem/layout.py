@@ -86,6 +86,15 @@ def _git(
     return value or None
 
 
+def canonical_digest(value: Any) -> str:
+    """SHA-256 over the canonical compact JSON encoding of a value."""
+
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def normalize_origin(value: str, base: Path | None = None) -> str:
     """Normalize common Git origin spellings without network access."""
 
@@ -273,6 +282,25 @@ def pending_paths(dream_id: str) -> list[Path]:
     if repos.is_dir():
         candidates.extend(
             child / "dreams" / "pending" / f"{dream_id}.json"
+            for child in repos.iterdir()
+            if child.is_dir() and not child.is_symlink()
+        )
+    return [path for path in candidates if path.is_file()]
+
+
+def pending_consolidation_paths(request_id: str, *, staged: bool = False) -> list[Path]:
+    """Find a pending consolidation request across every store."""
+
+    def pending_dir(store: Path) -> Path:
+        base = store / "consolidations"
+        return base / "migration" / "pending" if staged else base / "pending"
+
+    root = memory_root()
+    candidates = [pending_dir(root / "self") / f"{request_id}.json"]
+    repos = root / "repos"
+    if repos.is_dir():
+        candidates.extend(
+            pending_dir(child) / f"{request_id}.json"
             for child in repos.iterdir()
             if child.is_dir() and not child.is_symlink()
         )

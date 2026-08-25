@@ -1,9 +1,8 @@
 """Append-only fixed-width raw storage and rebuildable summary trees."""
 
-from __future__ import annotations
-
 import datetime as dt
 import fcntl
+import json
 import os
 import re
 import stat
@@ -12,14 +11,17 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from io import BufferedReader
 from pathlib import Path
-from typing import Callable, Generic, Iterator, TypeVar
+from typing import Callable, Generic, Iterator, Self, TypeVar
 
 from .layout import secure_directory, secure_file
 from .models import (
     INPUT_PROVENANCES,
     KINDS_BY_SCOPE,
+    MAX_OBSERVATION_TEXT_BYTES,
+    MAX_TRIGGER_CONTEXT_BYTES,
     MissingSummary,
     Note,
+    Observation,
     Provenance,
     Scope,
     StoreCorrupt,
@@ -29,6 +31,7 @@ from .models import (
 
 LOG_RECORD_BYTES = 320
 TREE_RECORD_BYTES = 288
+OBSERVATION_RECORD_BYTES = 2048
 MAX_PAYLOAD_BYTES = 280
 NAP_SUMMARY_BYTES = 240
 RAW_BLOCK = 2
@@ -70,7 +73,7 @@ class CapturedPrefix(Generic[_Metadata]):
     def close(self) -> None:
         self._handle.close()
 
-    def __enter__(self) -> CapturedPrefix[_Metadata]:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -107,6 +110,112 @@ def _record_count(path: Path, width: int) -> int:
         return path.stat().st_size // width
     except FileNotFoundError:
         return 0
+
+
+def validate_observation_fields(
+    scope: Scope, kind: str, provenance: str, text: str, trigger_context: str
+) -> None:
+    if kind not in KINDS_BY_SCOPE[scope]:
+        allowed = ", ".join(KINDS_BY_SCOPE[scope])
+        raise StoreCorrupt(f"kind {kind!r} is invalid for {scope}; use: {allowed}")
+    if provenance not in INPUT_PROVENANCES:
+        allowed = ", ".join(INPUT_PROVENANCES)
+        raise StoreCorrupt(f"provenance {provenance!r} is invalid; use: {allowed}")
+    for label, value, limit in (
+        ("text", text, MAX_OBSERVATION_TEXT_BYTES),
+        ("trigger_context", trigger_context, MAX_TRIGGER_CONTEXT_BYTES),
+    ):
+        if not value or value.strip() != value or "\n" in value or "\r" in value:
+            raise StoreCorrupt(
+                f"observation {label} must be one non-empty trimmed line"
+            )
+        encoded = value.encode("utf-8")
+        if len(encoded) > limit:
+            raise StoreCorrupt(
+                f"observation {label} is {len(encoded)} bytes; maximum is {limit}"
+            )
+
+
+def observation_payload(observation: Observation) -> dict[str, object]:
+    """Return the canonical compact payload used by records, requests, digests."""
+
+    return {
+        "id": observation.id,
+        "recorded_at": observation.recorded_at,
+        "kind": observation.kind,
+        "provenance": observation.provenance,
+        "text": observation.text,
+        "trigger_context": observation.trigger_context,
+    }
+
+
+def decode_observation_records(
+    data: bytes, scope: Scope, first_id: int = 0
+) -> tuple[Observation, ...]:
+    if len(data) % OBSERVATION_RECORD_BYTES:
+        raise StoreCorrupt("observation read ended inside a fixed-width record")
+    observations: list[Observation] = []
+    for offset in range(0, len(data), OBSERVATION_RECORD_BYTES):
+        raw = data[offset : offset + OBSERVATION_RECORD_BYTES].rstrip()
+        try:
+            line = raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise StoreCorrupt("observation log contains invalid UTF-8") from error
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise StoreCorrupt(
+                f"invalid observation record at byte {offset}"
+            ) from error
+        if not isinstance(value, dict) or set(value) != {
+            "id",
+            "recorded_at",
+            "kind",
+            "provenance",
+            "text",
+            "trigger_context",
+        }:
+            raise StoreCorrupt(f"invalid observation record at byte {offset}")
+        observation_id = value["id"]
+        expected_id = first_id + len(observations)
+        if type(observation_id) is not int or observation_id != expected_id:
+            raise StoreCorrupt(
+                f"observation identity mismatch: expected #{expected_id}, "
+                f"found {observation_id!r}"
+            )
+        recorded_at = value["recorded_at"]
+        if not isinstance(recorded_at, str):
+            raise StoreCorrupt(f"invalid timestamp in observation #{expected_id}")
+        try:
+            parsed = dt.datetime.fromisoformat(recorded_at)
+        except ValueError as error:
+            raise StoreCorrupt(
+                f"invalid timestamp in observation #{expected_id}"
+            ) from error
+        if parsed.utcoffset() is None:
+            raise StoreCorrupt(f"observation #{expected_id} timestamp lacks a timezone")
+        kind = value["kind"]
+        provenance = value["provenance"]
+        text = value["text"]
+        trigger_context = value["trigger_context"]
+        if not all(
+            isinstance(field, str)
+            for field in (kind, provenance, text, trigger_context)
+        ):
+            raise StoreCorrupt(f"invalid fields in observation #{expected_id}")
+        validate_observation_fields(scope, kind, provenance, text, trigger_context)
+        observations.append(
+            Observation(
+                id=observation_id,
+                recorded_at=recorded_at,
+                scope=scope,
+                kind=kind,
+                provenance=provenance,  # type: ignore[arg-type]
+                text=text,
+                trigger_context=trigger_context,
+            )
+        )
+    return tuple(observations)
 
 
 def _cover_raw(total: int, alpha: float) -> list[tuple[int, int]]:
@@ -168,32 +277,52 @@ class MemoryStore:
         self.path = path
         self.scope = scope
         self.log_path = path / "LOG.txt"
+        self.observations_path = path / "OBSERVATIONS.log"
         self.tree_path = path / "TREE"
         self.lock_path = path / ".store.lock"
 
+    def uses_observation_log(self) -> bool:
+        """Return whether this store uses the current candidate/integrated layout.
+
+        The observation log is written last at migration commit and created at
+        initialization for new stores, so its presence is the format marker.
+        """
+
+        return self.observations_path.is_file()
+
     def initialize(self) -> None:
         secure_directory(self.path)
-        secure_directory(self.tree_path)
-        secure_directory(self.path / "dreams")
-        secure_directory(self.path / "dreams" / "pending")
-        secure_directory(self.path / "dreams" / "generations")
-        if not self.log_path.exists():
-            self.log_path.touch(mode=0o600)
         if not self.lock_path.exists():
             self.lock_path.touch(mode=0o600)
-        secure_file(self.log_path)
         secure_file(self.lock_path)
+        if self.log_path.exists():
+            # A legacy store stays legacy until an explicit migration commits.
+            secure_directory(self.tree_path)
+            secure_directory(self.path / "dreams")
+            secure_directory(self.path / "dreams" / "pending")
+            secure_directory(self.path / "dreams" / "generations")
+            secure_file(self.log_path)
+            return
+        secure_directory(self.path / "consolidations")
+        secure_directory(self.path / "consolidations" / "pending")
+        secure_directory(self.path / "consolidations" / "generations")
+        if not self.observations_path.exists():
+            self.observations_path.touch(mode=0o600)
+        secure_file(self.observations_path)
 
     def require(self) -> None:
         if (
             self.path.is_symlink()
             or self.log_path.is_symlink()
+            or self.observations_path.is_symlink()
             or self.lock_path.is_symlink()
         ):
             raise StoreCorrupt(
                 f"refusing symlink in managed {self.scope} store {self.path}"
             )
-        if not self.path.is_dir() or not self.log_path.is_file():
+        if not self.path.is_dir() or not (
+            self.log_path.is_file() or self.observations_path.is_file()
+        ):
             raise StoreMissing(
                 f"no {self.scope} memory at {self.path}; run `memory init`"
             )
@@ -312,12 +441,17 @@ class MemoryStore:
         """Read a consistent prefix under the store lock."""
 
         with self.locked():
-            _repair(self.log_path, LOG_RECORD_BYTES)
-            total = _record_count(self.log_path, LOG_RECORD_BYTES)
-            if limit is not None:
-                total = min(total, limit)
-            with self.log_path.open("rb") as handle:
-                data = handle.read(total * LOG_RECORD_BYTES)
+            return self._snapshot_locked(limit)
+
+    def _snapshot_locked(self, limit: int | None = None) -> tuple[Note, ...]:
+        """Read a consistent prefix; the caller must hold the store lock."""
+
+        _repair(self.log_path, LOG_RECORD_BYTES)
+        total = _record_count(self.log_path, LOG_RECORD_BYTES)
+        if limit is not None:
+            total = min(total, limit)
+        with self.log_path.open("rb") as handle:
+            data = handle.read(total * LOG_RECORD_BYTES)
         return self.decode_records(data)
 
     def slice(self, lo: int, hi: int) -> tuple[Note, ...]:
@@ -387,6 +521,97 @@ class MemoryStore:
         return tuple(
             note for note in self.snapshot() if expression.search(note.payload)
         )
+
+    def _require_observation_log(self) -> None:
+        self.require()
+        if not self.uses_observation_log():
+            raise StoreCorrupt(
+                f"{self.scope} store at {self.path} is a legacy store; "
+                "candidate observations require migration"
+            )
+
+    def append_observation(
+        self, kind: str, provenance: str, text: str, trigger_context: str
+    ) -> Observation:
+        self._require_observation_log()
+        validate_observation_fields(self.scope, kind, provenance, text, trigger_context)
+        recorded_at = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
+        with self.locked():
+            _repair(self.observations_path, OBSERVATION_RECORD_BYTES)
+            observation_id = _record_count(self.observations_path, OBSERVATION_RECORD_BYTES)
+            record = {
+                "id": observation_id,
+                "recorded_at": recorded_at,
+                "kind": kind,
+                "provenance": provenance,
+                "text": text,
+                "trigger_context": trigger_context,
+            }
+            line = json.dumps(
+                record, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            )
+            encoded = line.encode("utf-8")
+            if len(encoded) > OBSERVATION_RECORD_BYTES - 1:
+                raise StoreCorrupt(
+                    f"encoded observation record is {len(encoded)} bytes; "
+                    f"fixed record holds {OBSERVATION_RECORD_BYTES - 1}"
+                )
+            with self.observations_path.open("ab") as handle:
+                handle.write(_pad(line, OBSERVATION_RECORD_BYTES))
+                handle.flush()
+                os.fsync(handle.fileno())
+        return Observation(
+            id=observation_id,
+            recorded_at=recorded_at,
+            scope=self.scope,
+            kind=kind,
+            provenance=provenance,  # type: ignore[arg-type]
+            text=text,
+            trigger_context=trigger_context,
+        )
+
+    def observation_count(self) -> int:
+        self._require_observation_log()
+        size = self.observations_path.stat().st_size
+        if size % OBSERVATION_RECORD_BYTES:
+            raise StoreCorrupt(
+                f"{self.observations_path} has a partial record; "
+                "append once to repair it"
+            )
+        return size // OBSERVATION_RECORD_BYTES
+
+    def observation_snapshot(self, limit: int | None = None) -> tuple[Observation, ...]:
+        """Read the complete observation prefix under the store lock.
+
+        A torn tail is ignored here and repaired only by a serialized writer.
+        """
+
+        self._require_observation_log()
+        with self.locked():
+            size = self.observations_path.stat().st_size
+            total = size // OBSERVATION_RECORD_BYTES
+            if limit is not None:
+                total = min(total, limit)
+            with self.observations_path.open("rb") as handle:
+                data = handle.read(total * OBSERVATION_RECORD_BYTES)
+        return decode_observation_records(data, self.scope)
+
+    def observation_slice(self, lo: int, hi: int) -> tuple[Observation, ...]:
+        self._require_observation_log()
+        if lo < 0 or hi < lo:
+            raise StoreCorrupt(f"invalid observation range {lo}-{hi}")
+        with self.observations_path.open("rb") as handle:
+            handle.seek(lo * OBSERVATION_RECORD_BYTES)
+            data = handle.read((hi - lo) * OBSERVATION_RECORD_BYTES)
+        records = decode_observation_records(data, self.scope, first_id=lo)
+        if len(records) != hi - lo:
+            raise StoreCorrupt(f"observation range {lo}-{hi} is outside the log")
+        return records
+
+    def observation_at(self, observation_id: int) -> Observation:
+        """Seek one observation by ID for bounded citation verification."""
+
+        return self.observation_slice(observation_id, observation_id + 1)[0]
 
     def _tree_file(self, size: int) -> Path:
         path = self.tree_path / str(size)
