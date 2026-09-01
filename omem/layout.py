@@ -7,33 +7,118 @@ import re
 import subprocess
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from urllib.parse import unquote, urlsplit, urlunsplit
 
+from .config import (
+    HOSTS,
+    HOST_ENV,
+    ROOT_ENV,
+    Host,
+    StorageMode,
+    config_path,
+    load_storage_mode,
+    memory_root,
+    parse_host,
+)
 from .models import MemoryError, RepoIdentity, Scope
+
+__all__ = [
+    "CODEX_NATIVE_MEMORY_SCOPE_ERROR",
+    "ROOT_ENV",
+    "Host",
+    "StoreContext",
+    "atomic_write_json",
+    "canonical_digest",
+    "config_path",
+    "current_repo",
+    "default_context",
+    "initialize_layout",
+    "is_codex_native_memory_path",
+    "memory_root",
+    "normalize_origin",
+    "pending_consolidation_paths",
+    "pending_paths",
+    "read_json",
+    "resolve_store_context",
+    "scope_path",
+    "scope_path_in",
+    "secure_directory",
+    "secure_file",
+]
 
 
 class _GitDeadlineExpired(Exception):
     """Internal signal that repository identity could not finish in time."""
 
 
-ROOT_ENV = "MEMORY_V0_DIR"
 CODEX_NATIVE_MEMORY_SCOPE_ERROR = (
     "repo scope is unavailable from a Codex native-memory directory; "
     "run the command from the intended task repository"
 )
 
 
-def memory_root() -> Path:
-    """Return the configured root without creating it."""
+@dataclass(frozen=True)
+class StoreContext:
+    """One immutable storage decision resolved once per invocation.
 
-    configured = os.environ.get(ROOT_ENV)
-    return (
-        Path(os.path.abspath(Path(configured).expanduser()))
-        if configured
-        else Path.home() / ".memory-v0"
+    Host identity selects a namespace before any scope path is built; it is
+    never a record field, a semantic scope, or a path fragment outside the
+    validated allow-list.
+    """
+
+    config_root: Path
+    store_root: Path
+    mode: StorageMode
+    host: Host | None
+
+
+def resolve_store_context(
+    explicit_host: str | None,
+    environment: Mapping[str, str] | None = None,
+) -> StoreContext:
+    """Resolve mode plus host into one store root, failing before I/O.
+
+    A supplied host is validated even in pooled mode, an explicit host that
+    disagrees with OMEM_HOST is rejected, and per-host mode without a host
+    fails before any path is constructed. Invalid storage configuration is
+    never downgraded to the pooled default.
+    """
+
+    env = os.environ if environment is None else environment
+    env_raw = env.get(HOST_ENV)
+    env_host = None if env_raw is None else parse_host(env_raw)
+    host: Host | None = None
+    if explicit_host is not None:
+        host = parse_host(explicit_host)
+        if env_host is not None and env_host != host:
+            raise MemoryError(
+                f"--host {explicit_host} conflicts with {HOST_ENV}={env_raw}"
+            )
+    else:
+        host = env_host
+    config_root = memory_root(env)
+    mode = load_storage_mode(env)
+    if mode == "per-host":
+        if host is None:
+            raise MemoryError(
+                f"per-host storage requires a host: pass --host <{'|'.join(HOSTS)}> "
+                f"or set {HOST_ENV} inside the host's own settings"
+            )
+        store_root = config_root / "hosts" / host
+    else:
+        store_root = config_root
+    return StoreContext(
+        config_root=config_root, store_root=store_root, mode=mode, host=host
     )
+
+
+def default_context(environment: Mapping[str, str] | None = None) -> StoreContext:
+    """Resolve a context from the process environment alone."""
+
+    return resolve_store_context(None, environment)
 
 
 def is_codex_native_memory_path(path: Path) -> bool:
@@ -178,10 +263,11 @@ def current_repo(
     )
 
 
-def scope_path(scope: Scope, repo: RepoIdentity | None = None) -> Path:
-    """Map a public scope to its durable store."""
+def scope_path_in(
+    root: Path, scope: Scope, repo: RepoIdentity | None = None
+) -> Path:
+    """Map a public scope to its durable store below an explicit root."""
 
-    root = memory_root()
     if scope == "self":
         return root / "self"
     resolved = repo or current_repo()
@@ -190,6 +276,17 @@ def scope_path(scope: Scope, repo: RepoIdentity | None = None) -> Path:
     if is_codex_native_memory_path(Path(resolved.root)):
         raise MemoryError(CODEX_NATIVE_MEMORY_SCOPE_ERROR)
     return root / "repos" / resolved.store_id
+
+
+def scope_path(
+    scope: Scope,
+    repo: RepoIdentity | None = None,
+    context: StoreContext | None = None,
+) -> Path:
+    """Map a public scope to its durable store in the selected namespace."""
+
+    resolved = context if context is not None else default_context()
+    return scope_path_in(resolved.store_root, scope, repo)
 
 
 def secure_directory(path: Path) -> None:
@@ -247,17 +344,25 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def initialize_layout(repo: RepoIdentity | None) -> tuple[Path, Path | None]:
-    """Create the self store and, when available, the current repo store."""
+def initialize_layout(
+    repo: RepoIdentity | None,
+    context: StoreContext | None = None,
+) -> tuple[Path, Path | None]:
+    """Create the self store and, when available, the current repo store.
 
-    root = memory_root()
+    Only the selected namespace is created; the other host namespace and any
+    inactive pooled tree are left untouched.
+    """
+
+    resolved = context if context is not None else default_context()
+    root = resolved.store_root
     secure_directory(root)
     secure_directory(root / "repos")
-    self_path = scope_path("self")
+    self_path = scope_path_in(root, "self")
     secure_directory(self_path)
     repo_path: Path | None = None
     if repo is not None:
-        repo_path = scope_path("repo", repo)
+        repo_path = scope_path_in(root, "repo", repo)
         secure_directory(repo_path)
         atomic_write_json(
             repo_path / "identity.json",
@@ -273,10 +378,14 @@ def initialize_layout(repo: RepoIdentity | None) -> tuple[Path, Path | None]:
     return self_path, repo_path
 
 
-def pending_paths(dream_id: str) -> list[Path]:
+def pending_paths(
+    dream_id: str, context: StoreContext | None = None
+) -> list[Path]:
     """Find a pending dream without trusting the current working directory."""
 
-    root = memory_root()
+    root = (
+        context if context is not None else default_context()
+    ).store_root
     candidates = [root / "self" / "dreams" / "pending" / f"{dream_id}.json"]
     repos = root / "repos"
     if repos.is_dir():
@@ -288,14 +397,21 @@ def pending_paths(dream_id: str) -> list[Path]:
     return [path for path in candidates if path.is_file()]
 
 
-def pending_consolidation_paths(request_id: str, *, staged: bool = False) -> list[Path]:
-    """Find a pending consolidation request across every store."""
+def pending_consolidation_paths(
+    request_id: str,
+    *,
+    staged: bool = False,
+    context: StoreContext | None = None,
+) -> list[Path]:
+    """Find a pending consolidation request inside the selected namespace."""
 
     def pending_dir(store: Path) -> Path:
         base = store / "consolidations"
         return base / "migration" / "pending" if staged else base / "pending"
 
-    root = memory_root()
+    root = (
+        context if context is not None else default_context()
+    ).store_root
     candidates = [pending_dir(root / "self") / f"{request_id}.json"]
     repos = root / "repos"
     if repos.is_dir():

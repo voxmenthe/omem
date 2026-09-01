@@ -28,6 +28,18 @@ class PackagingTest(unittest.TestCase):
             {str(path) for path in installed.files or ()},
         )
         self.assertIn(
+            "omem/host_hook.py",
+            {str(path) for path in installed.files or ()},
+        )
+        self.assertIn(
+            "omem/hook_context.py",
+            {str(path) for path in installed.files or ()},
+        )
+        self.assertIn(
+            "omem/config.py",
+            {str(path) for path in installed.files or ()},
+        )
+        self.assertNotIn(
             "omem/codex_hook.py",
             {str(path) for path in installed.files or ()},
         )
@@ -84,6 +96,7 @@ class PackagingTest(unittest.TestCase):
                 PROJECT / "SESSION_REVIEW.md"
             )
         )
+
     def test_tracked_codex_hooks_keep_two_read_only_routes(self) -> None:
         import tomllib
 
@@ -91,6 +104,10 @@ class PackagingTest(unittest.TestCase):
             (PROJECT / "integrations" / "codex" / "hooks.toml").read_text(
                 encoding="utf-8"
             )
+        )
+        self.assertEqual(
+            config["shell_environment_policy"]["set"],
+            {"OMEM_HOST": "codex"},
         )
         hooks = config["hooks"]
         self.assertEqual(set(hooks), {"UserPromptSubmit", "SessionStart"})
@@ -120,6 +137,45 @@ class PackagingTest(unittest.TestCase):
                     "timeout": 3,
                     "statusMessage": "Loading memory recovery checkpoint",
                     "additionalContextLimit": 800,
+                }
+            ],
+        )
+
+    def test_tracked_claude_settings_bind_host_and_two_routes(self) -> None:
+        import json
+
+        settings = json.loads(
+            (PROJECT / "integrations" / "claude" / "settings.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(settings.get("env"), {"OMEM_HOST": "claude"})
+        hooks = settings["hooks"]
+        self.assertEqual(set(hooks), {"UserPromptSubmit", "SessionStart"})
+        prompt_routes = hooks["UserPromptSubmit"]
+        self.assertEqual(len(prompt_routes), 1)
+        self.assertEqual(
+            prompt_routes[0]["hooks"],
+            [
+                {
+                    "type": "command",
+                    "command": "memory hook claude",
+                    "timeout": 3,
+                    "statusMessage": "Loading memory turn context",
+                }
+            ],
+        )
+        session_routes = hooks["SessionStart"]
+        self.assertEqual(len(session_routes), 1)
+        self.assertEqual(session_routes[0]["matcher"], "compact")
+        self.assertEqual(
+            session_routes[0]["hooks"],
+            [
+                {
+                    "type": "command",
+                    "command": "memory hook claude",
+                    "timeout": 3,
+                    "statusMessage": "Loading memory recovery checkpoint",
                 }
             ],
         )

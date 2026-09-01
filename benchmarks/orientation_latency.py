@@ -207,6 +207,7 @@ def _trial(repo: Path, stores: list[MemoryStore], layout: str) -> dict[str, Any]
             max_evidence_bytes=4096,
             max_items=3,
             deadline=time.monotonic() + 0.500,
+            store_root=stores[0].path.parent,
         )
     )
     total_ms = (time.perf_counter() - started) * 1000

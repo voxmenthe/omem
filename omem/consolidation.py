@@ -32,6 +32,7 @@ from .generations import (
     record_failure,
 )
 from .layout import (
+    StoreContext,
     atomic_write_json,
     canonical_digest,
     pending_consolidation_paths,
@@ -526,12 +527,17 @@ def apply_pending(
     return generation
 
 
-def apply_consolidation(request_id: str, result: dict[str, Any]) -> IntegratedGeneration:
+def apply_consolidation(
+    request_id: str,
+    result: dict[str, Any],
+    *,
+    context: StoreContext | None = None,
+) -> IntegratedGeneration:
     """Validate and atomically apply a pending consolidation result."""
 
     if REQUEST_ID_RE.fullmatch(request_id) is None:
         raise ConsolidationError("request ID must be 24 lowercase hexadecimal characters")
-    matches = pending_consolidation_paths(request_id)
+    matches = pending_consolidation_paths(request_id, context=context)
     if not matches:
         raise ConsolidationError(f"unknown pending consolidation {request_id}")
     if len(matches) != 1:

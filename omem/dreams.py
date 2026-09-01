@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .layout import (
+    StoreContext,
     atomic_write_json,
     pending_paths,
     read_json,
@@ -496,12 +497,17 @@ def _record_failure(store: MemoryStore, dream_id: str, reason: str) -> None:
     secure_file(path)
 
 
-def apply_dream(dream_id: str, result: dict[str, Any]) -> DreamArtifact:
+def apply_dream(
+    dream_id: str,
+    result: dict[str, Any],
+    *,
+    context: StoreContext | None = None,
+) -> DreamArtifact:
     """Validate and atomically project a pending dream result."""
 
     if re.fullmatch(r"[0-9a-f]{24}", dream_id) is None:
         raise DreamError("dream ID must be 24 lowercase hexadecimal characters")
-    matches = pending_paths(dream_id)
+    matches = pending_paths(dream_id, context=context)
     if not matches:
         raise DreamError(f"unknown pending dream {dream_id}")
     if len(matches) != 1:

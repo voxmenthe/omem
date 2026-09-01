@@ -1,24 +1,30 @@
 """Config, policy, layout, codec, and storage for integrated generations.
 
-This is the storage layer beneath the consolidation protocol: the optional
-root `config.toml` policy file, the artifact layout for one store (live or
-migration staging), the strict JSON codec for generation payloads, and the
-atomic pointer/reader that decides which generation is current. Nothing here
-judges evidence; the protocol in `consolidation.py` does.
+This is the storage layer beneath the consolidation protocol: the artifact
+layout for one store (live or migration staging), the strict JSON codec for
+generation payloads, and the atomic pointer/reader that decides which
+generation is current. The root policy file is parsed by `omem.config`; this
+module re-exposes its policy entry points for callers of the storage layer.
+Nothing here judges evidence; the protocol in `consolidation.py` does.
 """
 
 import datetime as dt
 import json
 import os
 import re
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .config import (
+    CONFIG_NAME,
+    DEFAULT_POLICY,
+    ITEM_BUDGET,
+    config_path,
+    fetch_policy,
+)
 from .layout import (
     canonical_digest,
-    memory_root,
     read_json,
     secure_directory,
     secure_file,
@@ -50,12 +56,6 @@ from .store import (
     observation_payload,
 )
 
-CONFIG_NAME = "config.toml"
-ITEM_BUDGET = {"self": 16, "repo": 24}
-DEFAULT_POLICY = ConsolidationPolicy(
-    catalog_pruning="off", self_catalog_target=16, repo_catalog_target=24
-)
-
 HEX_64_RE = re.compile(r"[0-9a-f]{64}")
 REQUEST_ID_RE = re.compile(r"[0-9a-f]{24}")
 
@@ -65,10 +65,6 @@ def now() -> str:
 
 
 # --- Root policy file -------------------------------------------------------
-
-
-def config_path() -> Path:
-    return memory_root() / CONFIG_NAME
 
 
 def policy_payload(policy: ConsolidationPolicy) -> dict[str, Any]:
@@ -81,55 +77,6 @@ def policy_payload(policy: ConsolidationPolicy) -> dict[str, Any]:
 
 def policy_digest(policy: ConsolidationPolicy) -> str:
     return canonical_digest(policy_payload(policy))
-
-
-def fetch_policy() -> ConsolidationPolicy:
-    """Load the optional root config; an absent file means the documented default."""
-
-    path = config_path()
-    if not path.exists():
-        return DEFAULT_POLICY
-    try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as error:
-        raise ConsolidationError(f"cannot parse OMem config {path}: {error}")
-    if set(data) != {"consolidation"} or not isinstance(data["consolidation"], dict):
-        raise ConsolidationError(
-            f"{path} must contain exactly one [consolidation] section"
-        )
-    section = data["consolidation"]
-    unknown = set(section) - {
-        "catalog_pruning",
-        "self_catalog_target",
-        "repo_catalog_target",
-    }
-    if unknown:
-        raise ConsolidationError(
-            f"{path} has unknown consolidation keys: {', '.join(sorted(unknown))}"
-        )
-    profile = section.get("catalog_pruning", "off")
-    if not isinstance(profile, str) or profile not in PRUNING_PROFILES:
-        allowed = ", ".join(PRUNING_PROFILES)
-        raise ConsolidationError(
-            f"{path} catalog_pruning must be one of: {allowed}"
-        )
-    targets: dict[str, int] = {}
-    for key, scope, default in (
-        ("self_catalog_target", "self", DEFAULT_POLICY.self_catalog_target),
-        ("repo_catalog_target", "repo", DEFAULT_POLICY.repo_catalog_target),
-    ):
-        value = section.get(key, default)
-        if type(value) is not int or not 1 <= value <= ITEM_BUDGET[scope]:
-            raise ConsolidationError(
-                f"{path} {key} must be an integer between 1 and "
-                f"{ITEM_BUDGET[scope]}"
-            )
-        targets[key] = value
-    return ConsolidationPolicy(
-        catalog_pruning=profile,  # type: ignore[arg-type]
-        self_catalog_target=targets["self_catalog_target"],
-        repo_catalog_target=targets["repo_catalog_target"],
-    )
 
 
 # --- Generation storage -----------------------------------------------------

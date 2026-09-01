@@ -11,7 +11,15 @@ from importlib import resources
 from pathlib import Path
 from typing import Sequence
 
-from .codex_hook import command_codex_hook
+from .config import (
+    CONFIG_NAME,
+    HOST_ENV,
+    HOSTS,
+    ROOT_ENV,
+    ConfigError,
+    config_path,
+    fetch_policy,
+)
 from .consolidation import (
     ROUTINE_DUE_OBSERVATIONS,
     apply_consolidation,
@@ -31,21 +39,20 @@ from .dreams import (
     validate_current_sources,
 )
 from .generations import (
-    config_path,
-    fetch_policy,
     load_current_generation,
     validate_generation_sources,
 )
+from .host_hook import command_host_hook
 from .layout import (
     CODEX_NATIVE_MEMORY_SCOPE_ERROR,
-    ROOT_ENV,
+    StoreContext,
     current_repo,
     initialize_layout,
     is_codex_native_memory_path,
-    memory_root,
     pending_consolidation_paths,
     pending_paths,
-    scope_path,
+    resolve_store_context,
+    scope_path_in,
 )
 from .models import (
     ConsolidationError,
@@ -67,30 +74,38 @@ FALLIBILITY_NOTICE = (
 USAGE = """memory - scoped, auditable memory for coding agents
 
 Usage:
-  memory init
-  memory wake
-  memory orient [--explain] "<query>"
-  memory note <scope>:<kind>:<provenance> --context "<trigger context>" "<candidate>"
-  memory recall <scope> <regex>
-  memory consolidate <scope>
-  memory consolidate apply <request-id>    # result JSON on stdin
-  memory migrate <scope>
-  memory migrate apply <request-id>        # result JSON on stdin
-  memory status
+  memory [--host codex|claude] init
+  memory [--host codex|claude] wake
+  memory [--host codex|claude] orient [--explain] "<query>"
+  memory [--host codex|claude] note <scope>:<kind>:<provenance> --context "<trigger context>" "<candidate>"
+  memory [--host codex|claude] recall <scope> <regex>
+  memory [--host codex|claude] consolidate <scope>
+  memory [--host codex|claude] consolidate apply <request-id>    # result JSON on stdin
+  memory [--host codex|claude] migrate <scope>
+  memory [--host codex|claude] migrate apply <request-id>        # result JSON on stdin
+  memory [--host codex|claude] status
 
 Maintenance audit (unintegrated evidence, not usable memory):
-  memory candidates <scope> <regex>
+  memory [--host codex|claude] candidates <scope> <regex>
 
 Legacy stores, until migrated:
-  memory note <scope>:<kind>:<provenance> "<text>"
-  memory nap [scope]
-  memory nap <scope> <lo>-<hi> "<summary>"
-  memory dream <scope>                     # deprecated alias for consolidate
-  memory dream apply <dream-id>
+  memory [--host codex|claude] note <scope>:<kind>:<provenance> "<text>"
+  memory [--host codex|claude] nap [scope]
+  memory [--host codex|claude] nap <scope> <lo>-<hi> "<summary>"
+  memory [--host codex|claude] dream <scope>                     # deprecated alias for consolidate
+  memory [--host codex|claude] dream apply <dream-id>
 
 Optional integrations:
+  memory hook codex          # equivalent to the compatibility alias below
   memory codex-hook
+  memory hook claude
   memory review-sessions <session-path> [<session-path> ...]
+
+Host selection:
+  `--host` (or the OMEM_HOST environment variable bound inside a host's own
+  settings) selects which host is running. In pooled storage mode it only
+  labels diagnostics; in per-host mode it selects an independent namespace
+  under <root>/hosts/<host>/ and is required.
 
 Session workflow:
   1. Run `memory wake` at session start. Read its bounded self and current-repo
@@ -213,20 +228,30 @@ Consolidation protocol:
   misleading items is mandatory under every profile. Retiring an item or
   rejecting a candidate never deletes observations or generations.
 
-Optional pruning policy:
+Optional pruning and storage policy:
   One root config file ($MEMORY_V0_DIR/config.toml or ~/.memory-v0/config.toml):
+
+    [storage]
+    mode = "pooled"               # pooled | per-host
 
     [consolidation]
     catalog_pruning = "off"       # off | conservative | balanced | aggressive
     self_catalog_target = 16
     repo_catalog_target = 24
 
-  An absent file means the documented defaults. Inferred-staleness and
-  capacity retirement of still-valid items happen only under an explicit
-  profile; capacity retirement additionally requires target pressure, and age
-  or review counts never act as automatic deletion rules. A malformed config
-  blocks consolidation requests and applies and is visible in `memory status`;
-  it never disables wake, recall, orient, or hook reads of a valid generation.
+  An absent file, absent [storage] section, or absent mode means pooled: every
+  host shares <root>/self and <root>/repos/<repo-id>. With per-host mode each
+  host resolves an independent namespace under <root>/hosts/<host>/; a valid
+  host selection is then required before any store access. Switching modes
+  never copies, merges, relabels, or deletes data; it only changes which
+  namespace is active. Inferred-staleness and capacity retirement of still-valid
+  items happen only under an explicit profile; capacity retirement additionally
+  requires target pressure, and age or review counts never act as automatic
+  deletion rules. A malformed config blocks consolidation requests and applies
+  and is visible in `memory status`; invalid storage configuration blocks store
+  access entirely instead of silently assuming pooled. It never disables wake,
+  recall, orient, or hook reads of a valid generation when the storage section
+  itself is valid.
 
 Legacy migration:
   Stores created before consolidation (raw LOG.txt with dreams and trees) keep
@@ -273,37 +298,39 @@ def _read_packaged_text(name: str) -> str:
     return resources.files("omem").joinpath(name).read_text(encoding="utf-8")
 
 
-def _store(scope: Scope) -> MemoryStore:
-    return MemoryStore(scope_path(scope), scope)
+def _store(scope: Scope, context: StoreContext) -> MemoryStore:
+    return MemoryStore(scope_path_in(context.store_root, scope), scope)
 
 
 def _store_exists(store: MemoryStore) -> bool:
     return store.log_path.is_file() or store.observations_path.is_file()
 
 
-def _existing_scopes() -> list[tuple[Scope, MemoryStore]]:
+def _existing_scopes(context: StoreContext) -> list[tuple[Scope, MemoryStore]]:
     stores: list[tuple[Scope, MemoryStore]] = []
-    self_store = _store("self")
+    self_store = _store("self", context)
     if _store_exists(self_store):
         stores.append(("self", self_store))
     repo = current_repo()
     if repo is not None and not is_codex_native_memory_path(Path(repo.root)):
-        repo_store = MemoryStore(scope_path("repo", repo), "repo")
+        repo_store = MemoryStore(scope_path_in(context.store_root, "repo", repo), "repo")
         if _store_exists(repo_store):
             stores.append(("repo", repo_store))
     return stores
 
 
-def _wake_scopes() -> list[tuple[Scope, MemoryStore]]:
+def _wake_scopes(context: StoreContext) -> list[tuple[Scope, MemoryStore]]:
     """Return expected scopes, including missing ones for visible degradation."""
 
-    root = memory_root()
-    if not root.exists():
+    root = context.store_root
+    if not context.config_root.exists() and context.mode == "pooled":
         return []
-    stores: list[tuple[Scope, MemoryStore]] = [("self", _store("self"))]
+    stores: list[tuple[Scope, MemoryStore]] = [("self", _store("self", context))]
     repo = current_repo()
     if repo is not None and not is_codex_native_memory_path(Path(repo.root)):
-        stores.append(("repo", MemoryStore(scope_path("repo", repo), "repo")))
+        stores.append(
+            ("repo", MemoryStore(scope_path_in(root, "repo", repo), "repo"))
+        )
     return stores
 
 
@@ -424,12 +451,14 @@ def _render_scope(scope: Scope, store: MemoryStore) -> list[str]:
     return lines
 
 
-def command_init(args: Sequence[str]) -> int:
+def command_init(args: Sequence[str], context: StoreContext) -> int:
     if args:
         raise MemoryError("init takes no arguments")
     repo = current_repo()
     repo_blocked = repo is not None and is_codex_native_memory_path(Path(repo.root))
-    self_path, repo_path = initialize_layout(None if repo_blocked else repo)
+    self_path, repo_path = initialize_layout(
+        None if repo_blocked else repo, context
+    )
     MemoryStore(self_path, "self").initialize()
     if repo_path is not None:
         MemoryStore(repo_path, "repo").initialize()
@@ -446,7 +475,7 @@ def command_init(args: Sequence[str]) -> int:
     return 0
 
 
-def command_orient(args: Sequence[str]) -> int:
+def command_orient(args: Sequence[str], context: StoreContext) -> int:
     """Render bounded prompt-conditioned evidence for an explicit query."""
 
     explain = bool(args and args[0] == "--explain")
@@ -460,6 +489,7 @@ def command_orient(args: Sequence[str]) -> int:
             max_evidence_bytes=4096,
             max_items=3,
             deadline=time.monotonic() + 2.0,
+            store_root=context.store_root,
         )
     )
     if explain:
@@ -513,14 +543,15 @@ def command_review_sessions(args: Sequence[str]) -> int:
     return 0
 
 
-def command_wake(args: Sequence[str]) -> int:
+def command_wake(args: Sequence[str], context: StoreContext) -> int:
     if args:
         raise MemoryError("wake takes no arguments")
     lines = [FALLIBILITY_NOTICE]
-    scopes = _wake_scopes()
+    scopes = _wake_scopes(context)
     if not scopes:
         lines.append(
-            f"[degraded] no initialized memory under {memory_root()}; run `memory init`"
+            f"[degraded] no initialized memory under {context.store_root}; "
+            "run `memory init`"
         )
     for scope, store in scopes:
         try:
@@ -532,7 +563,7 @@ def command_wake(args: Sequence[str]) -> int:
     return 0
 
 
-def command_note(args: Sequence[str]) -> int:
+def command_note(args: Sequence[str], context: StoreContext) -> int:
     if not args:
         raise MemoryError('note requires <scope>:<kind>:<provenance> "<text>"')
     match = _TAG.fullmatch(args[0])
@@ -541,7 +572,7 @@ def command_note(args: Sequence[str]) -> int:
             "metadata must be <self|repo>:<kind>:<user|observed|inferred>"
         )
     scope: Scope = match.group("scope")  # type: ignore[assignment]
-    store = _store(scope)
+    store = _store(scope, context)
     if store.uses_observation_log():
         if len(args) != 4 or args[1] != "--context":
             raise MemoryError(
@@ -581,11 +612,11 @@ def command_note(args: Sequence[str]) -> int:
     return 0
 
 
-def command_recall(args: Sequence[str]) -> int:
+def command_recall(args: Sequence[str], context: StoreContext) -> int:
     if len(args) != 2 or args[0] not in ("self", "repo"):
         raise MemoryError("recall requires <self|repo> <regex>")
     scope: Scope = args[0]  # type: ignore[assignment]
-    store = _store(scope)
+    store = _store(scope, context)
     if store.uses_observation_log():
         try:
             expression = re.compile(args[1])
@@ -617,13 +648,13 @@ def command_recall(args: Sequence[str]) -> int:
     return 0
 
 
-def command_candidates(args: Sequence[str]) -> int:
+def command_candidates(args: Sequence[str], context: StoreContext) -> int:
     """Audit unintegrated candidate evidence; never an ordinary recall path."""
 
     if len(args) != 2 or args[0] not in ("self", "repo"):
         raise MemoryError("candidates requires <self|repo> <regex>")
     scope: Scope = args[0]  # type: ignore[assignment]
-    store = _store(scope)
+    store = _store(scope, context)
     if not store.uses_observation_log():
         raise MemoryError(
             "candidates audits observation logs; this is a legacy store "
@@ -676,7 +707,7 @@ def command_candidates(args: Sequence[str]) -> int:
     return 0
 
 
-def command_consolidate(args: Sequence[str]) -> int:
+def command_consolidate(args: Sequence[str], context: StoreContext) -> int:
     if len(args) == 2 and args[0] == "apply":
         request_id = args[1]
         try:
@@ -687,8 +718,8 @@ def command_consolidate(args: Sequence[str]) -> int:
             ) from error
         if not isinstance(value, dict):
             raise ConsolidationError("consolidation result must be a JSON object")
-        generation = apply_consolidation(request_id, value)
-        matches = pending_consolidation_paths(request_id)
+        generation = apply_consolidation(request_id, value, context=context)
+        matches = pending_consolidation_paths(request_id, context=context)
         if len(matches) != 1:
             raise ConsolidationError(
                 "applied consolidation request cannot be resolved to one store"
@@ -703,30 +734,30 @@ def command_consolidate(args: Sequence[str]) -> int:
     if len(args) != 1 or args[0] not in ("self", "repo"):
         raise MemoryError("consolidate requires <self|repo> or apply <request-id>")
     scope: Scope = args[0]  # type: ignore[assignment]
-    bundle = request_consolidation(_store(scope))
+    bundle = request_consolidation(_store(scope, context))
     print(json.dumps(bundle, indent=2, ensure_ascii=False, sort_keys=True))
     return 0
 
 
-def command_dream(args: Sequence[str]) -> int:
+def command_dream(args: Sequence[str], context: StoreContext) -> int:
     """Legacy alias: consolidation on current stores, dreams on legacy ones."""
 
     if len(args) == 2 and args[0] == "apply":
         request_id = args[1]
-        if not pending_paths(request_id):
+        if not pending_paths(request_id, context=context):
             print(
                 "memory dream is deprecated; applying via consolidation",
                 file=sys.stderr,
             )
-            return command_consolidate(["apply", request_id])
+            return command_consolidate(["apply", request_id], context)
         try:
             value = json.load(sys.stdin)
         except json.JSONDecodeError as error:
             raise DreamError(f"malformed dream result JSON: {error}") from error
         if not isinstance(value, dict):
             raise DreamError("dream result must be a JSON object")
-        artifact = apply_dream(request_id, value)
-        matches = pending_paths(request_id)
+        artifact = apply_dream(request_id, value, context=context)
+        matches = pending_paths(request_id, context=context)
         if len(matches) != 1:
             raise DreamError("applied dream request cannot be resolved to one store")
         applied_store = MemoryStore(matches[0].parents[2], artifact.scope)
@@ -739,7 +770,7 @@ def command_dream(args: Sequence[str]) -> int:
     if len(args) != 1 or args[0] not in ("self", "repo"):
         raise MemoryError("dream requires <self|repo> or apply <dream-id>")
     scope: Scope = args[0]  # type: ignore[assignment]
-    store = _store(scope)
+    store = _store(scope, context)
     if store.uses_observation_log():
         print(
             "memory dream is deprecated; use `memory consolidate`",
@@ -785,9 +816,9 @@ def _nap_prompt(scope: Scope, store: MemoryStore) -> int:
     return 0
 
 
-def command_nap(args: Sequence[str]) -> int:
+def command_nap(args: Sequence[str], context: StoreContext) -> int:
     if not args:
-        scopes = _existing_scopes()
+        scopes = _existing_scopes(context)
         if not scopes:
             raise MemoryError("no initialized scope; run `memory init`")
         for scope, store in scopes:
@@ -802,7 +833,7 @@ def command_nap(args: Sequence[str]) -> int:
     if args[0] not in ("self", "repo"):
         raise MemoryError("nap scope must be self or repo")
     scope: Scope = args[0]  # type: ignore[assignment]
-    store = _store(scope)
+    store = _store(scope, context)
     if store.uses_observation_log():
         raise MemoryError(
             "nap is legacy-only; current stores maintain memory through "
@@ -979,12 +1010,40 @@ def _status_legacy(scope: Scope, store: MemoryStore) -> None:
         )
 
 
-def command_status(args: Sequence[str]) -> int:
+def command_status(
+    args: Sequence[str],
+    context: StoreContext,
+    explicit_host: str | None,
+) -> int:
     if args:
         raise MemoryError("status takes no arguments")
-    root = memory_root()
-    print(f"root={root}")
+    host_source = (
+        "--host" if explicit_host else (HOST_ENV if os.environ.get(HOST_ENV) else "none")
+    )
+    print(f"root={context.config_root}")
     print(f"root_env={ROOT_ENV} ({'set' if os.environ.get(ROOT_ENV) else 'default'})")
+    print(f"storage_mode={context.mode}")
+    print(f"host={context.host or 'none'} (host_source={host_source})")
+    print(f"store_root={context.store_root}")
+    if context.mode == "per-host":
+        pooled_active = (context.config_root / "self").exists() or (
+            context.config_root / "repos"
+        ).exists()
+        print(f"inactive_pooled={'present' if pooled_active else 'absent'}")
+        if pooled_active:
+            print(
+                "warning: pooled data exists while per-host mode is active; "
+                "it is retained but hidden until the mode returns to pooled"
+            )
+    else:
+        hosts_dir = context.config_root / "hosts"
+        inactive_hosts = [
+            host
+            for host in HOSTS
+            if (hosts_dir / host).is_dir() and not (hosts_dir / host).is_symlink()
+        ]
+        if inactive_hosts:
+            print(f"inactive_hosts={','.join(inactive_hosts)}")
     config = config_path()
     try:
         policy = fetch_policy()
@@ -1006,7 +1065,7 @@ def command_status(args: Sequence[str]) -> int:
             print(f"repo_scope=blocked ({CODEX_NATIVE_MEMORY_SCOPE_ERROR})")
         else:
             print(f"repo_store_id={repo.store_id}")
-    stores = _existing_scopes()
+    stores = _existing_scopes(context)
     if not stores:
         print("initialized_scopes=none")
         return 0
@@ -1018,7 +1077,7 @@ def command_status(args: Sequence[str]) -> int:
     return 0
 
 
-def command_migrate(args: Sequence[str]) -> int:
+def command_migrate(args: Sequence[str], context: StoreContext) -> int:
     if len(args) == 2 and args[0] == "apply":
         request_id = args[1]
         try:
@@ -1029,12 +1088,12 @@ def command_migrate(args: Sequence[str]) -> int:
             ) from error
         if not isinstance(value, dict):
             raise ConsolidationError("migration result must be a JSON object")
-        print(apply_migration(request_id, value))
+        print(apply_migration(request_id, value, context=context))
         return 0
     if len(args) != 1 or args[0] not in ("self", "repo"):
         raise MemoryError("migrate requires <self|repo> or apply <request-id>")
     scope: Scope = args[0]  # type: ignore[assignment]
-    bundle = request_migration(_store(scope))
+    bundle = request_migration(_store(scope, context))
     if bundle.get("protocol") == "memory-migration-complete":
         print(f"migration committed for {scope}")
         return 0
@@ -1045,7 +1104,7 @@ def command_migrate(args: Sequence[str]) -> int:
 COMMANDS = {
     "init": command_init,
     "orient": command_orient,
-    "codex-hook": command_codex_hook,
+    "hook": command_host_hook,
     "review-sessions": command_review_sessions,
     "wake": command_wake,
     "note": command_note,
@@ -1058,19 +1117,44 @@ COMMANDS = {
     "status": command_status,
 }
 
+def _parse_global_host(arguments: list[str]) -> tuple[str | None, list[str]]:
+    """Split a leading --host <value> from the remaining arguments."""
+
+    if len(arguments) >= 2 and arguments[0] == "--host":
+        return arguments[1], arguments[2:]
+    if arguments and arguments[0] == "--host":
+        raise MemoryError("--host requires one of: " + ", ".join(HOSTS))
+    if any(argument == "--host" for argument in arguments[1:]):
+        raise MemoryError("--host must appear immediately after `memory`")
+    return None, arguments
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if not arguments or arguments[0] in ("-h", "--help", "help"):
         print(USAGE.rstrip())
         return 0
-    command = COMMANDS.get(arguments[0])
-    if command is None:
-        print(f"error: unknown command {arguments[0]!r}", file=sys.stderr)
-        print(USAGE.rstrip(), file=sys.stderr)
-        return 2
     try:
-        return command(arguments[1:])
+        explicit_host, arguments = _parse_global_host(arguments)
+        if not arguments:
+            raise MemoryError("a command is required after --host")
+        # Compatibility alias: `memory codex-hook` is the permanent spelling
+        # of `memory hook codex`.
+        if arguments[0] == "codex-hook":
+            arguments = ["hook", "codex", *arguments[1:]]
+        command = COMMANDS.get(arguments[0])
+        if command is None:
+            print(f"error: unknown command {arguments[0]!r}", file=sys.stderr)
+            print(USAGE.rstrip(), file=sys.stderr)
+            return 2
+        if command is command_review_sessions:
+            return command(arguments[1:])
+        if command is command_host_hook:
+            return command_host_hook(arguments[1:], explicit_host)
+        context = resolve_store_context(explicit_host)
+        if command is command_status:
+            return command_status(arguments[1:], context, explicit_host)
+        return command(arguments[1:], context)
     except (MemoryError, OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

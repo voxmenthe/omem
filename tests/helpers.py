@@ -20,6 +20,7 @@ def run_memory(
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment["MEMORY_V0_DIR"] = str(root)
+    environment.pop("OMEM_HOST", None)
     return subprocess.run(
         [sys.executable, str(MEMORY), *args],
         cwd=cwd or PROJECT,

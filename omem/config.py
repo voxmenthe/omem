@@ -1,0 +1,183 @@
+"""Strict root configuration boundary: storage routing and consolidation policy.
+
+This module owns the optional root `config.toml` ($MEMORY_V0_DIR/config.toml
+or ~/.memory-v0/config.toml), the memory root resolution it lives under, and
+the allow-listed host identity used to select a storage namespace. Storage
+routing and consolidation policy are validated independently: a semantic
+`[consolidation]` error never blocks storage routing, and no storage error is
+silently downgraded to the pooled default.
+
+Nothing here creates a root, writes a file, or moves data.
+"""
+
+import os
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Final, Literal, Mapping
+
+from .models import (
+    ConsolidationError,
+    ConsolidationPolicy,
+    MemoryError,
+    PRUNING_PROFILES,
+)
+
+ROOT_ENV = "MEMORY_V0_DIR"
+HOST_ENV = "OMEM_HOST"
+CONFIG_NAME = "config.toml"
+
+StorageMode = Literal["pooled", "per-host"]
+Host = Literal["codex", "claude"]
+
+STORAGE_MODES: Final = ("pooled", "per-host")
+HOSTS: Final = ("codex", "claude")
+
+ITEM_BUDGET: Final = {"self": 16, "repo": 24}
+DEFAULT_POLICY: Final = ConsolidationPolicy(
+    catalog_pruning="off", self_catalog_target=16, repo_catalog_target=24
+)
+
+
+class ConfigError(MemoryError):
+    """The root configuration is unusable for storage routing."""
+
+
+def memory_root(environment: Mapping[str, str] | None = None) -> Path:
+    """Return the configured root without creating it."""
+
+    env = os.environ if environment is None else environment
+    configured = env.get(ROOT_ENV)
+    return (
+        Path(os.path.abspath(Path(configured).expanduser()))
+        if configured
+        else Path.home() / ".memory-v0"
+    )
+
+
+def config_path(environment: Mapping[str, str] | None = None) -> Path:
+    return memory_root(environment) / CONFIG_NAME
+
+
+def parse_host(value: object) -> Host:
+    """Return the allow-listed host or reject the value before any path use."""
+
+    if isinstance(value, str) and value in HOSTS:
+        return value  # type: ignore[return-value]
+    raise ConfigError(
+        f"unknown OMem host {value!r}; expected one of: {', '.join(HOSTS)}"
+    )
+
+
+def _read_toml(
+    environment: Mapping[str, str] | None,
+) -> tuple[Path, dict[str, Any] | None]:
+    """Return (path, data); data is None when the file is absent."""
+
+    path = config_path(environment)
+    if not path.exists():
+        return path, None
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise ConfigError(f"cannot parse OMem config {path}: {error}") from error
+    return path, data
+
+
+def _reject_unknown_sections(path: Path, data: dict[str, Any]) -> None:
+    unknown = set(data) - {"storage", "consolidation"}
+    if unknown:
+        raise ConfigError(
+            f"{path} has unknown sections: {', '.join(sorted(unknown))}; "
+            "expected [storage] and/or [consolidation]"
+        )
+
+
+def load_storage_mode(
+    environment: Mapping[str, str] | None = None,
+) -> StorageMode:
+    """Resolve the storage mode; an absent file or section means pooled.
+
+    A malformed file, an unknown section, or an invalid [storage] section
+    raises ConfigError instead of guessing pooled: this value chooses which
+    namespace of memories a command may read or write.
+    """
+
+    path, data = _read_toml(environment)
+    if data is None:
+        return "pooled"
+    _reject_unknown_sections(path, data)
+    section = data.get("storage")
+    if section is None:
+        return "pooled"
+    if not isinstance(section, dict):
+        raise ConfigError(f"{path} [storage] must be a table")
+    unknown = set(section) - {"mode"}
+    if unknown:
+        raise ConfigError(
+            f"{path} has unknown storage keys: {', '.join(sorted(unknown))}"
+        )
+    if "mode" not in section:
+        return "pooled"
+    mode = section["mode"]
+    if mode not in STORAGE_MODES:
+        allowed = ", ".join(STORAGE_MODES)
+        raise ConfigError(f"{path} storage.mode must be one of: {allowed}")
+    return mode  # type: ignore[return-value]
+
+
+def fetch_policy(
+    environment: Mapping[str, str] | None = None,
+) -> ConsolidationPolicy:
+    """Load the optional consolidation policy with its documented defaults.
+
+    Storage routing problems surface here too (as ConsolidationError) because
+    a request/apply must not proceed against a config it cannot fully read,
+    but a semantic [consolidation] error is the only one callers must treat
+    as consolidation-specific.
+    """
+
+    try:
+        path, data = _read_toml(environment)
+        if data is None:
+            return DEFAULT_POLICY
+        _reject_unknown_sections(path, data)
+    except ConfigError as error:
+        raise ConsolidationError(str(error)) from error
+    section = data.get("consolidation")
+    if section is None:
+        return DEFAULT_POLICY
+    if not isinstance(section, dict):
+        raise ConsolidationError(f"{path} [consolidation] must be a table")
+    unknown = set(section) - {
+        "catalog_pruning",
+        "self_catalog_target",
+        "repo_catalog_target",
+    }
+    if unknown:
+        raise ConsolidationError(
+            f"{path} has unknown consolidation keys: {', '.join(sorted(unknown))}"
+        )
+    profile = section.get("catalog_pruning", "off")
+    if not isinstance(profile, str) or profile not in PRUNING_PROFILES:
+        allowed = ", ".join(PRUNING_PROFILES)
+        raise ConsolidationError(
+            f"{path} catalog_pruning must be one of: {allowed}"
+        )
+    targets: dict[str, int] = {}
+    for key, scope, default in (
+        ("self_catalog_target", "self", DEFAULT_POLICY.self_catalog_target),
+        ("repo_catalog_target", "repo", DEFAULT_POLICY.repo_catalog_target),
+    ):
+        value = section.get(key, default)
+        if type(value) is not int or not 1 <= value <= ITEM_BUDGET[scope]:
+            raise ConsolidationError(
+                f"{path} {key} must be an integer between 1 and "
+                f"{ITEM_BUDGET[scope]}"
+            )
+        targets[key] = value
+    return ConsolidationPolicy(
+        catalog_pruning=profile,  # type: ignore[arg-type]
+        self_catalog_target=targets["self_catalog_target"],
+        repo_catalog_target=targets["repo_catalog_target"],
+    )

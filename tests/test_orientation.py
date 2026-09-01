@@ -61,6 +61,7 @@ class IntegratedOrientationTest(unittest.TestCase):
             max_evidence_bytes=max_bytes,
             max_items=3,
             deadline=time.monotonic() + 1,
+            store_root=self.root,
         )
 
     def _integrate(self, store: MemoryStore, text: str, source_ids, when: str) -> None:
@@ -276,6 +277,7 @@ class OrientationServiceTest(unittest.TestCase):
             max_evidence_bytes=max_bytes,
             max_items=3,
             deadline=time.monotonic() + 1,
+            store_root=self.root,
         )
 
     def _manifest(self) -> dict[str, tuple[bytes, int]]:

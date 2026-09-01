@@ -19,6 +19,7 @@ from .consolidation import apply_pending, build_request, fetch_policy
 from .dreams import DreamError, load_current, validate_current_sources
 from .generations import GenerationLayout, now, read_current, record_failure
 from .layout import (
+    StoreContext,
     atomic_write_json,
     canonical_digest,
     pending_consolidation_paths,
@@ -254,12 +255,17 @@ def _commit(
         shutil.rmtree(_staging_root(store))
 
 
-def apply_migration(request_id: str, result: dict[str, Any]) -> str:
+def apply_migration(
+    request_id: str,
+    result: dict[str, Any],
+    *,
+    context: StoreContext | None = None,
+) -> str:
     """Apply one staged bootstrap result; commit on the final batch."""
 
     if re.fullmatch(r"[0-9a-f]{24}", request_id) is None:
         raise ConsolidationError("request ID must be 24 lowercase hexadecimal characters")
-    matches = pending_consolidation_paths(request_id, staged=True)
+    matches = pending_consolidation_paths(request_id, staged=True, context=context)
     if not matches:
         raise ConsolidationError(f"unknown pending migration {request_id}")
     if len(matches) != 1:

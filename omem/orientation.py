@@ -17,8 +17,7 @@ from .layout import (
     canonical_digest,
     current_repo,
     is_codex_native_memory_path,
-    memory_root,
-    scope_path,
+    scope_path_in,
 )
 from .models import (
     DreamArtifact,
@@ -61,6 +60,7 @@ class OrientationRequest:
     max_evidence_bytes: int
     max_items: int = 3
     deadline: float
+    store_root: Path
 
 
 @dataclass(frozen=True)
@@ -682,11 +682,11 @@ def fetch_orientation(
         return OrientationResult((), "", "deadline")
 
     stores: list[MemoryStore] = []
-    self_store = MemoryStore(memory_root() / "self", "self")
+    self_store = MemoryStore(request.store_root / "self", "self")
     if self_store.log_path.is_file() or self_store.observations_path.is_file():
         stores.append(self_store)
     if repo is not None:
-        repo_store = MemoryStore(scope_path("repo", repo), "repo")
+        repo_store = MemoryStore(scope_path_in(request.store_root, "repo", repo), "repo")
         if repo_store.log_path.is_file() or repo_store.observations_path.is_file():
             stores.append(repo_store)
     if not stores:

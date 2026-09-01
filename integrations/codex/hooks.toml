@@ -1,3 +1,9 @@
+# OMem Codex integration: two read-only hook routes plus the host binding.
+# Merge into your Codex configuration; never replace unrelated settings.
+
+[shell_environment_policy.set]
+OMEM_HOST = "codex"
+
 [[hooks.UserPromptSubmit]]
 
 [[hooks.UserPromptSubmit.hooks]]
