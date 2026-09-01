@@ -69,6 +69,9 @@ when you want an isolated trial.
 
 ### 3. Give your coding agent the memory workflow
 
+OMem currently supports only Codex.
+Support for Claude Code and other agents is coming soon.
+
 Merge [`INSTRUCTIONS.md`](INSTRUCTIONS.md) into the target repository's
 `AGENTS.md`. Keep the instructions that are already there. Start a fresh agent
 session in that repository and confirm that it runs `memory init` and
