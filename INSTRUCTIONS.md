@@ -105,9 +105,16 @@ Resume the task.
 <!-- END OMEM COMPACTION CHECKPOINT -->
 
 - Before task handoff, run `memory status`. For each scope with
-  `consolidation_due=yes`, run `memory consolidate <scope>`, produce
+  `consolidation_due=yes` or `review_recommended=yes`, run `memory consolidate <scope>`, produce
   contract-compliant JSON using only its supplied evidence, and pipe the exact
   result to `memory consolidate apply <request-id>`.
+- `review_recommended` also surfaces an initial catalog or new evidence waiting
+  seven days. Age prompts judgment, never automatic admission or rejection.
+  Unoffered deferred records carry forward unchanged; do not repeatedly review
+  unchanged deferred evidence without a new reason. If `capacity_blocked=yes`,
+  resolve the catalog/pruning decision before repeating the same review.
+- Wake is a bounded startup view; use task-conditioned `memory orient` or
+  `memory recall` to search all eligible items, including those wake omitted.
 - If this session records a candidate that directly corrects or supersedes a
   current integrated memory, run the consolidate request/apply workflow at
   handoff even when `consolidation_due=no`. Consolidation is also where a

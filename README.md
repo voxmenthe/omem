@@ -213,8 +213,10 @@ log — so candidate volume does not change prompt latency or size. It does not
 create or repair a store, run a consolidation, read a transcript, save the
 query, or write the query to a log. Personal and repository memory are checked
 separately, so one can still work when the other fails. The lookup gets
-500 ms. The reminder and memory records together can use at most 800 UTF-8
-bytes, and records are admitted whole or not at all.
+500 ms. The reminder and memory records together can use at most 4,096 UTF-8
+bytes, enough for one maximum-length escaped claim and its applicability.
+Personal and repository matches compete on relevance; records are admitted
+whole under the byte budget before the three-item limit is applied.
 
 `memory orient "<query>"` runs the same lookup by hand with a 2-second deadline
 and a 4,096-byte evidence limit. `--explain` shows the source and score for
@@ -257,8 +259,12 @@ integrated generation is missing or damaged, wake prints `[scope|degraded]`
 for that scope and still shows the other one. There is never a fallback to raw
 candidate text or legacy tree summaries.
 
-Wake renders each active integrated memory with its source label, claim,
-applicability condition, and cited observation IDs. A scope with no generation
+Wake renders up to 16 personal and 24 repository memories, prioritizing
+invariants and explicit user choices, then newest supporting observation IDs.
+Each includes its source label,
+claim, applicability condition, and citations. It reports omitted item counts;
+`recall` and task-conditioned `orient` still search the entire active catalog.
+A scope with no generation
 yet shows an empty-memory state with candidate counts and the exact next
 maintenance action.
 
@@ -285,10 +291,14 @@ model:
 
 1. `memory consolidate repo` saves and prints a bounded JSON request: the
    complete current integrated set with its maintenance rationale, the
-   observations those items cite, the deferred backlog with apply-derived
+   observations those items cite, selected deferred candidates with apply-derived
    review history, and the next contiguous batch of new observations. At most
    256 candidate observations are offered per request, so total history can
-   grow without bound while each request stays small.
+   grow without bound. Up to 64 slots are reserved for new evidence when a
+   backlog competes with it; unused slots go to other candidates. Deferred
+   candidates with fewer prior reviews are offered first. Unoffered deferred
+   records carry forward unchanged, including their review counts. The full
+   catalog and its cited evidence are additional input to this bound.
 2. Send the model's JSON result to `memory consolidate apply <request-id>`
    through standard input.
 
@@ -340,7 +350,12 @@ Observations saved after the request stay as clearly counted later debt.
 
 Routine consolidation comes due after twelve new candidates. A strong,
 well-contextualized correction should not wait: consolidate immediately. A
-deferred backlog by itself does not retrigger routine consolidation.
+new store with candidates also receives an initial review opportunity, and
+unreviewed evidence waiting seven days receives an age-based opportunity.
+Status distinguishes these with `review_recommended` and `review_reason`.
+Age invites judgment; it never promotes or rejects evidence. A deferred backlog
+by itself does not retrigger maintenance. Do not repeatedly review unchanged
+evidence without a new correction, supporting evidence, or policy decision.
 
 ### Retirement and pruning profiles
 
@@ -364,6 +379,14 @@ self_catalog_target = 16
 repo_catalog_target = 24
 ```
 
+Each scope can hold up to 128 eligible items, independently of wake and hook
+output limits. Targets between 1 and 128 guide optional capacity pruning;
+they are not admission ceilings. Raising eligibility capacity does not make a
+candidate deserving of promotion or permit unrelated lessons to share a slot.
+Use the updated CLI across all writers once a catalog exceeds the former 16/24
+limits; older binaries reject those larger catalogs. Existing generations and
+retained version-1 requests remain readable by the updated implementation.
+
 An absent file means `off` with 16/24 targets. `memory init` never creates the
 file. Profiles raise how much affirmative evidence suffices; age or a review
 count never acts as an automatic deletion rule under any profile. Unknown keys,
@@ -385,8 +408,9 @@ dreams — keep their legacy behavior until you migrate them explicitly:
    with more than 256 notes advance through several bounded batches. Ordinary
    legacy reads and writes continue unchanged throughout.
 3. The final apply validates everything and commits atomically: the staged
-   observation log, generations, and current pointer move into place, and the
-   observation log — the activation marker — is written last. `LOG.txt`,
+   generations and current pointer are prepared first. A complete sibling
+   observation file is flushed and synchronized, then atomically renamed to
+   `OBSERVATIONS.log` under the store lock and its directory synchronized. `LOG.txt`,
    `TREE/`, and `dreams/` remain as a read-only archive.
 
 Deleting `<store>/consolidations/migration` abandons a staged migration safely.
@@ -394,6 +418,18 @@ A legacy write during staging marks the staging stale, and the next
 `memory migrate` rebuilds it. Observations written after migration are not
 visible to an old binary; do not run mixed-version writers against one store,
 and do not downgrade a store after migrating it.
+
+If activation fails before the rename, legacy reads remain intact; rerun
+`memory migrate <scope>` to finish the reviewed staging. If cleanup fails after
+the rename, the complete current store is already usable; do not replace its log.
+
+For an incomplete marker left by an older version, run
+`memory migrate recover <scope>` from the intended repository. Recovery requires
+unchanged legacy evidence, complete matching reviewed staging, and a live log
+that is a strict byte prefix of that staging log. It archives the partial bytes
+as `OBSERVATIONS.interrupted-<digest>.log` before resuming. It refuses completed
+or nonmatching logs and never truncates or merges later observations. Preserve
+the whole store for investigation if these checks fail.
 
 ## Storage and failure boundaries
 
@@ -424,11 +460,15 @@ the same origin share one store. `memory status` shows the resolved identity and
 path.
 
 Status also shows the candidate count, integrated count, observation
-checkpoint, deferred and rejected counts, retirement counts by basis, the
+checkpoint, deferred counts, current-generation rejected and retired counts, the
 effective pruning profile and catalog target, pending consolidation requests,
 failed applies with the latest bounded reason, and for legacy scopes whether a
 migration is available or staged. Retained requests and older generations are
-history. They do not mean maintenance is due.
+history. Actionable pending requests must still match the current generation
+and policy, including deferred-only or retirement-only requests. Status validates
+current citation digests and reports oldest unreviewed age, capacity blockage,
+and whether the latest catalog is initial, changed, or unchanged. A recent
+consolidation timestamp or `consolidation_due=no` is not a memory-health verdict.
 
 A damaged store affects one memory scope. Damage to `consolidations/current.json`
 affects only that scope's integrated view; it never causes a fallback to raw
@@ -465,9 +505,12 @@ invalid consolidation results, stale and conflicting applies, migration
 interruption and commit, lookup limits, unsafe input, output size, compaction,
 and session review input.
 
-The semantic example file provides repeatable input. The lookup trials check
-which memories OMem selects. The latency benchmark checks the time limits.
-Test with real Codex sessions before relying on OMem for important work.
+The semantic example scores a supplied legacy-style answer; it does not judge
+new consolidation decisions. The lookup trials test supplied selector fixtures,
+and the latency benchmark measures bounded retrieval, not task benefit.
+The [evaluation protocol](evaluation/README.md) separates capture and judgment,
+delivery, and correct use in matched tasks. These engineering checks do not
+establish improved agent decisions.
 
 ## Removal
 

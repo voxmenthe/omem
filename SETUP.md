@@ -174,10 +174,20 @@ Prompt orientation is local, deterministic, model-free, and read-only. It reads
 only the current integrated generation of each store, never the candidate log,
 so candidate volume does not change prompt latency or size. It does not
 initialize, repair, or mutate stores; run consolidations; read transcripts; or
-persist/log the prompt. It has one 500 ms in-process deadline and an 800-byte
+persist/log the prompt. It has one 500 ms in-process deadline and a 4,096-byte
 decoded checkpoint-plus-evidence budget. Legacy stores that have not migrated
 keep the old 10,000-record raw ceiling. A no-match or any contained provider
 failure returns the canonical checkpoint alone.
+
+Matches from both scopes compete by relevance within the final byte budget.
+Wake shows at most 16 personal and 24 repository items, while prompt lookup and
+manual recall search the full catalog of up to 128 eligible items per scope.
+When upgrading an existing Codex installation, update only the OMem
+`UserPromptSubmit` handler's `additionalContextLimit` to `4096`, as in the
+tracked snippet. Codex expresses that setting in approximate tokens; OMem
+independently enforces the stricter 4,096-byte output ceiling. The compaction
+reminder can keep its existing `800` setting. See the official
+[hook output contract](https://learn.chatgpt.com/docs/hooks#large-hook-output).
 
 Use `memory orient "<query>"` for the same selection manually. It has a 2-second
 deadline and 4,096-byte evidence budget. `memory recall <scope> <regex>`

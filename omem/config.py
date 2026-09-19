@@ -33,7 +33,8 @@ Host = Literal["codex", "claude"]
 STORAGE_MODES: Final = ("pooled", "per-host")
 HOSTS: Final = ("codex", "claude")
 
-ITEM_BUDGET: Final = {"self": 16, "repo": 24}
+ITEM_BUDGET: Final = {"self": 128, "repo": 128}
+WAKE_ITEM_BUDGET: Final = {"self": 16, "repo": 24}
 DEFAULT_POLICY: Final = ConsolidationPolicy(
     catalog_pruning="off", self_catalog_target=16, repo_catalog_target=24
 )

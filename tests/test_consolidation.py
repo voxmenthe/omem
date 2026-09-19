@@ -13,6 +13,7 @@ from omem.consolidation import (
     consolidation_due,
     consolidation_failure_summary,
     pending_consolidation_counts,
+    review_opportunity,
     request_consolidation,
 )
 from omem.generations import (
@@ -25,7 +26,7 @@ from omem.generations import (
     policy_digest,
     validate_generation_sources,
 )
-from omem.layout import scope_path
+from omem.layout import atomic_write_json, canonical_digest, scope_path
 from omem.models import ConsolidationError
 from omem.store import MemoryStore
 
@@ -79,8 +80,8 @@ class PolicyTest(unittest.TestCase):
             '[consolidation]\ncatalog_pruning = "ruthless"\n',
             '[consolidation]\ncatalog_pruning = 3\n',
             '[consolidation]\nself_catalog_target = 0\n',
-            '[consolidation]\nself_catalog_target = 17\n',
-            '[consolidation]\nrepo_catalog_target = 25\n',
+            '[consolidation]\nself_catalog_target = 129\n',
+            '[consolidation]\nrepo_catalog_target = 129\n',
             '[consolidation]\nself_catalog_target = true\n',
         )
         for text in cases:
@@ -146,6 +147,24 @@ class ConsolidationTest(unittest.TestCase):
         new, due = consolidation_due(self.store)
         self.assertEqual((new, due), (ROUTINE_DUE_OBSERVATIONS, True))
 
+    def test_sparse_review_uses_age_without_repeated_deferred_reviews(self) -> None:
+        import datetime as dt
+
+        self._observe("initial candidate")
+        self.assertEqual(review_opportunity(self.store, None, 1)[1], "initial_catalog")
+        bundle = request_consolidation(self.store)
+        current = apply_consolidation(bundle["request_id"], self._result(
+            bundle, deferred=[{"source_id": 0, "reason": "needs independent support"}]
+        ))
+        self.assertEqual(review_opportunity(self.store, current, 1), (None, None))
+        self._observe("later candidate")
+        self.assertIsNone(review_opportunity(self.store, current, 2)[1])
+        future = dt.datetime.now(dt.UTC) + dt.timedelta(days=8)
+        with mock.patch("omem.consolidation.now", return_value=future.isoformat()):
+            age, reason = review_opportunity(self.store, current, 2)
+        self.assertGreaterEqual(age, 7 * 86400)
+        self.assertEqual(reason, "aged_candidates")
+
     def test_request_binds_policy_evidence_and_checkpoint(self) -> None:
         first = self._observe("first candidate")
         bundle = request_consolidation(self.store)
@@ -160,6 +179,47 @@ class ConsolidationTest(unittest.TestCase):
         self.assertEqual(bundle["observations"][0]["trigger_context"], "while testing")
         again = request_consolidation(self.store)
         self.assertEqual(again, bundle)
+
+    def test_retained_v1_pending_request_still_applies(self) -> None:
+        self._observe("legacy request lesson")
+        bundle = request_consolidation(self.store)
+        del bundle["request_version"]
+        bundle["item_budget"] = 16
+        binding = {key: bundle[key] for key in (
+            "scope", "store_key", "base_generation", "source_count", "policy_digest", "supplied_digest"
+        )}
+        binding["migration"] = False
+        bundle["request_id"] = canonical_digest(binding)[:24]
+        atomic_write_json(live_layout(self.store).pending_dir / f"{bundle['request_id']}.json", bundle)
+        generation = apply_consolidation(bundle["request_id"], self._result(
+            bundle, items=[self._item("legacy request lesson", [0])]
+        ))
+        self.assertEqual(generation.items[0].text, "legacy request lesson")
+
+    def test_status_validates_citations_and_distinguishes_unchanged_catalog(self) -> None:
+        import io
+        from contextlib import redirect_stdout
+        from omem.cli import _status_current
+
+        self._observe("stored lesson")
+        first = request_consolidation(self.store)
+        result = self._result(first, items=[self._item("stored lesson", [0])])
+        apply_consolidation(first["request_id"], result)
+        next_bundle = request_consolidation(self.store)
+        apply_consolidation(next_bundle["request_id"], self._result(
+            next_bundle, items=result["items"]
+        ))
+        output = io.StringIO()
+        with redirect_stdout(output):
+            _status_current("self", self.store)
+        self.assertIn("catalog_outcome=unchanged", output.getvalue())
+        raw = self.store.observations_path.read_bytes()
+        self.store.observations_path.write_bytes(raw.replace(b"stored lesson", b"forged lesson"))
+        output = io.StringIO()
+        with redirect_stdout(output):
+            _status_current("self", self.store)
+        self.assertIn("current_generation=invalid:", output.getvalue())
+        self.assertIn("no longer matches its digest", output.getvalue())
 
     def test_apply_promotes_defers_and_rejects_exactly_once(self) -> None:
         promoted = self._observe("durable lesson")
@@ -286,6 +346,39 @@ class ConsolidationTest(unittest.TestCase):
         self.assertEqual(live_layout(self.store).current_path.read_bytes(), pointer)
         count, _ = consolidation_failure_summary(self.store)
         self.assertEqual(count, 2)
+
+    def test_deferred_replay_does_not_change_generation_or_reviews(self) -> None:
+        self._observe("awaiting corroboration")
+        for review in range(2):
+            bundle = request_consolidation(self.store)
+            result = self._result(bundle, deferred=[{"source_id": 0, "reason": "needs context"}])
+            with mock.patch("omem.consolidation.now", return_value=f"2026-09-19T00:00:0{review}+00:00"):
+                first = apply_consolidation(bundle["request_id"], result)
+            pointer = live_layout(self.store).current_path.read_bytes()
+            with mock.patch("omem.consolidation.now", return_value="2026-09-20T00:00:00+00:00"):
+                self.assertEqual(apply_consolidation(bundle["request_id"], result), first)
+            self.assertEqual(first.deferred[0].review_count, review + 1)
+            self.assertEqual(live_layout(self.store).current_path.read_bytes(), pointer)
+            self.assertEqual(consolidation_failure_summary(self.store), (0, None))
+        conflicting = self._result(bundle, deferred=[{"source_id": 0, "reason": "different judgment"}])
+        with self.assertRaisesRegex(ConsolidationError, "conflicting result"):
+            apply_consolidation(bundle["request_id"], conflicting)
+        self.assertEqual(live_layout(self.store).current_path.read_bytes(), pointer)
+
+    def test_deferred_only_request_is_actionable_and_stale_request_is_not(self) -> None:
+        self._observe("awaiting corroboration")
+        initial = request_consolidation(self.store)
+        apply_consolidation(initial["request_id"], self._result(
+            initial, deferred=[{"source_id": 0, "reason": "needs context"}]
+        ))
+        review = request_consolidation(self.store)
+        self.assertEqual(pending_consolidation_counts(self.store), (1, 2))
+        self._observe("new context")
+        newer = request_consolidation(self.store)
+        apply_consolidation(newer["request_id"], self._result(
+            newer, items=[self._item("resolved lesson", [0, 1])]
+        ))
+        self.assertEqual(pending_consolidation_counts(self.store), (0, 3))
 
     def test_malformed_config_blocks_apply_but_reads_still_work(self) -> None:
         self._observe("one")
@@ -498,6 +591,36 @@ class ConsolidationTest(unittest.TestCase):
         second_bundle = request_consolidation(self.store)
         self.assertEqual(len(second_bundle["observations"]), 30)
 
+    def test_saturated_deferred_backlog_preserves_unoffered_records_and_advances(self) -> None:
+        for index in range(MAX_OFFERED_OBSERVATIONS):
+            self._observe(f"lesson {index}")
+        initial = request_consolidation(self.store)
+        before = apply_consolidation(initial["request_id"], self._result(
+            initial, deferred=[{"source_id": index, "reason": "needs context"}
+                               for index in range(MAX_OFFERED_OBSERVATIONS)]
+        ))
+        self._observe("new resolving correction", provenance="user")
+        bundle = request_consolidation(self.store)
+        self.assertEqual([item["id"] for item in bundle["observations"]], [256])
+        self.assertEqual(len(bundle["deferred"]), 255)
+        self.assertFalse(bundle["headroom_required"])
+        reviewed = {entry["source_id"] for entry in bundle["deferred"]}
+        result = self._result(bundle, deferred=[
+            {"source_id": entry["source_id"], "reason": "still needs context"}
+            for entry in bundle["deferred"]
+        ] + [{"source_id": 256, "reason": "requires comparison"}])
+        after = apply_consolidation(bundle["request_id"], result)
+        self.assertEqual(after.source_count, 257)
+        self.assertEqual(len(after.deferred), 257)
+        carried = [record for record in before.deferred if record.source_id not in reviewed]
+        self.assertEqual([record for record in after.deferred if record.source_id in {r.source_id for r in carried}], carried)
+        self.assertEqual(apply_consolidation(bundle["request_id"], result), after)
+        next_bundle = request_consolidation(self.store)
+        self.assertEqual(len(next_bundle["deferred"]), 256)
+        self.assertTrue({record.source_id for record in carried}.issubset(
+            {entry["source_id"] for entry in next_bundle["deferred"]}
+        ))
+
     def test_item_budget_is_a_hard_ceiling(self) -> None:
         for index in range(ITEM_BUDGET["self"] + 1):
             self._observe(f"lesson {index}")
@@ -511,6 +634,37 @@ class ConsolidationTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ConsolidationError, "budget"):
             apply_consolidation(bundle["request_id"], over)
+
+    def test_catalog_can_grow_past_wake_target_without_losing_old_rules(self) -> None:
+        from omem.cli import _render_current_scope
+
+        for index in range(20):
+            self._observe(f"distinct lesson {index}")
+        bundle = request_consolidation(self.store)
+        generation = apply_consolidation(bundle["request_id"], self._result(
+            bundle, items=[self._item(f"distinct lesson {index}", [index]) for index in range(20)]
+        ))
+        self.assertEqual(len(generation.items), 20)
+        rendered = "\n".join(_render_current_scope("self", self.store))
+        self.assertEqual(rendered.count("[self|integrated|"), 16)
+        self.assertIn("distinct lesson 19", rendered)
+        self.assertIn("omitted_integrated=4", rendered)
+        self.assertEqual(generation.items[0].text, "distinct lesson 0")
+
+    def test_wake_keeps_explicit_user_choices_ahead_of_newer_observed_facts(self) -> None:
+        from omem.cli import _render_current_scope
+
+        self._observe("Require consent before interrupting an active app", provenance="user")
+        for index in range(20):
+            self._observe(f"recent observation {index}")
+        bundle = request_consolidation(self.store)
+        apply_consolidation(bundle["request_id"], self._result(bundle, items=[
+            self._item("Require consent before interrupting an active app", [0], provenance="user"),
+            *(self._item(f"recent observation {index}", [index+1]) for index in range(20)),
+        ]))
+        rendered = "\n".join(_render_current_scope("self", self.store))
+        self.assertIn("Require consent before interrupting an active app", rendered)
+        self.assertEqual(rendered.count("[self|integrated|"), 16)
 
     def test_pending_counts_track_actionable_requests(self) -> None:
         self.assertEqual(pending_consolidation_counts(self.store), (0, 0))

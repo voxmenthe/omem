@@ -4,7 +4,7 @@ One builder owns the behavior shared by every supported host edge: loading
 the packaged canonical instructions, extracting exactly one marked
 checkpoint, computing the remaining evidence budget, invoking the bounded
 orientation service for turn queries, admitting only complete rendered
-items, and enforcing the final 800 UTF-8-byte maximum.
+items, and enforcing the final 4,096 UTF-8-byte maximum.
 
 The builder never encodes JSON, prints, reads a transcript, initializes,
 repairs, or writes a store, or infers a host. Host identity arrives only as
@@ -23,7 +23,8 @@ TURN_CHECKPOINT_START = "<!-- BEGIN OMEM TURN CHECKPOINT -->"
 TURN_CHECKPOINT_END = "<!-- END OMEM TURN CHECKPOINT -->"
 COMPACTION_CHECKPOINT_START = "<!-- BEGIN OMEM COMPACTION CHECKPOINT -->"
 COMPACTION_CHECKPOINT_END = "<!-- END OMEM COMPACTION CHECKPOINT -->"
-CONTEXT_LIMIT_BYTES = 800
+# Fits one maximum-length claim and applicability even after JSON escaping.
+CONTEXT_LIMIT_BYTES = 4096
 ORIENTATION_DEADLINE_SECONDS = 0.500
 EVIDENCE_SEPARATOR = "\n\n"
 

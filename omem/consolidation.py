@@ -8,6 +8,7 @@ ever unlinked: observations, generations, pending requests, and failure records
 remain as audit history.
 """
 
+import datetime as dt
 import hashlib
 import json
 from pathlib import Path
@@ -61,7 +62,9 @@ from .validation import observation_index, validate_result
 
 CONSOLIDATION_PROTOCOL = "memory-consolidation-request"
 MAX_OFFERED_OBSERVATIONS = 256
+NEW_OBSERVATION_RESERVE = 64
 ROUTINE_DUE_OBSERVATIONS = 12
+SPARSE_REVIEW_AGE_SECONDS = 7 * 86400
 
 SELF_CONSOLIDATION_RUBRIC = (
     "Integrate durable user facts, preferences, and meaningful episodes that are "
@@ -89,8 +92,11 @@ CONSOLIDATION_INSTRUCTIONS = (
     "Synthesize applicability.when from the contexts where the lesson will "
     "matter; do not restate the trigger event. Defer plausible but "
     "under-supported observations; reject noise, same-incident duplicates, and "
-    "candidates whose repeated review, age, non-recurrence, or changed context "
-    "shows low reuse. Review every base item: retain it unchanged or retire it "
+    "candidates whose supplied evidence shows low reuse. Age, review counts, "
+    "and capacity alone never justify rejection. Keep each item focused on one "
+    "decision condition; do not bundle unrelated lessons to save slots. "
+    "Unoffered deferred candidates are carried forward unchanged by apply. "
+    "Review every base item: retain it unchanged or retire it "
     "once with a bounded reason. Safety retirement of contradicted, superseded, "
     "inapplicable, or misleading items is mandatory under every profile, and an "
     "unresolved conflict leaves no active item. Apply the pruning profile only "
@@ -144,11 +150,16 @@ def build_request(
 
     checkpoint = base.source_count if base is not None else 0
     deferred_records = list(base.deferred) if base is not None else []
-    if len(deferred_records) > MAX_OFFERED_OBSERVATIONS:
-        raise ConsolidationError(
-            f"deferred backlog has {len(deferred_records)} entries; the "
-            f"{MAX_OFFERED_OBSERVATIONS}-observation request cap was exceeded"
-        )
+    total = layout.observations_path.stat().st_size // OBSERVATION_RECORD_BYTES
+    if total < checkpoint:
+        raise ConsolidationError("observation log is shorter than the reviewed checkpoint")
+    room = max(
+        NEW_OBSERVATION_RESERVE, MAX_OFFERED_OBSERVATIONS - len(deferred_records)
+    )
+    advance = min(total - checkpoint, room)
+    # Review less-seen candidates first; new evidence always gets bounded room.
+    deferred_records.sort(key=lambda record: (record.review_count, record.source_id))
+    deferred_records = deferred_records[: MAX_OFFERED_OBSERVATIONS - advance]
     deferred: list[dict[str, Any]] = []
     for record in deferred_records:
         observation = observations_at(
@@ -164,9 +175,6 @@ def build_request(
             }
         )
 
-    total = layout.observations_path.stat().st_size // OBSERVATION_RECORD_BYTES
-    room = MAX_OFFERED_OBSERVATIONS - len(deferred)
-    advance = min(total - checkpoint, max(0, room))
     observations = [
         observation_payload(observation)
         for observation in observations_at(
@@ -212,6 +220,8 @@ def build_request(
             "policy_digest": digest,
             "supplied_digest": supplied_digest,
             "migration": migration is not None,
+            "request_version": 2,
+            "item_budget": ITEM_BUDGET[store.scope],
         }
     )
     rubric = (
@@ -219,6 +229,7 @@ def build_request(
     )
     bundle: dict[str, Any] = {
         "protocol": CONSOLIDATION_PROTOCOL,
+        "request_version": 2,
         "request_id": request_id,
         "store_key": _store_key(store),
         "scope": store.scope,
@@ -230,7 +241,7 @@ def build_request(
         "policy_digest": digest,
         "item_budget": ITEM_BUDGET[store.scope],
         "catalog_target": policy.catalog_target(store.scope),
-        "headroom_required": room <= 0,
+        "headroom_required": False,
         "rubric": rubric,
         "instructions": CONSOLIDATION_INSTRUCTIONS,
         "result_contract": {
@@ -322,12 +333,16 @@ def _validate_pending(pending: dict[str, Any], request_id: str) -> Scope:
         "observations",
         "supplied_digest",
     }
-    optional = {"migration"}
+    optional = {"migration", "request_version"}
     keys = set(pending)
     if not required.issubset(keys) or keys - required - optional:
         raise ConsolidationError("pending consolidation has unexpected keys")
     if pending["protocol"] != CONSOLIDATION_PROTOCOL:
         raise ConsolidationError("pending consolidation has an invalid protocol")
+    if "request_version" in pending and (
+        type(pending["request_version"]) is not int or pending["request_version"] != 2
+    ):
+        raise ConsolidationError("pending consolidation has an unsupported request version")
     if pending["request_id"] != request_id:
         raise ConsolidationError("pending consolidation file and payload IDs disagree")
     scope = pending["scope"]
@@ -343,7 +358,12 @@ def _validate_pending(pending: dict[str, Any], request_id: str) -> Scope:
     policy = parse_policy_payload(pending["policy"])
     if policy_digest(policy) != pending["policy_digest"]:
         raise ConsolidationError("pending consolidation policy digest mismatch")
-    if pending["item_budget"] != ITEM_BUDGET[scope] or pending[
+    expected_budget = (
+        ITEM_BUDGET[scope]
+        if "request_version" in pending
+        else {"self": 16, "repo": 24}[scope]
+    )
+    if pending["item_budget"] != expected_budget or pending[
         "catalog_target"
     ] != policy.catalog_target(scope):
         raise ConsolidationError("pending consolidation has invalid budgets")
@@ -374,6 +394,11 @@ def _validate_pending(pending: dict[str, Any], request_id: str) -> Scope:
             "policy_digest": pending["policy_digest"],
             "supplied_digest": pending["supplied_digest"],
             "migration": "migration" in pending,
+            **(
+                {"request_version": 2, "item_budget": pending["item_budget"]}
+                if "request_version" in pending
+                else {}
+            ),
         }
     )
     if expected != request_id:
@@ -402,7 +427,17 @@ def _enrich_validated_result(
     prior_deferred = {
         record.source_id: record for record in (base.deferred if base else ())
     }
-    deferred_records = []
+    offered_deferred = {entry["source_id"] for entry in pending["deferred"]}
+    deferred_records = [
+        {
+            "source_id": record.source_id,
+            "reason": record.reason,
+            "first_reviewed": record.first_reviewed,
+            "review_count": record.review_count,
+        }
+        for record in prior_deferred.values()
+        if record.source_id not in offered_deferred
+    ]
     for source_id in deferred_ids:
         reason = next(
             entry["reason"] for entry in result["deferred"] if entry["source_id"] == source_id
@@ -416,6 +451,7 @@ def _enrich_validated_result(
                 "review_count": prior.review_count + 1 if prior else 1,
             }
         )
+    deferred_records.sort(key=lambda record: record["source_id"])
     citation_digests = {}
     for item in items:
         for source_id in item.source_ids:
@@ -489,6 +525,28 @@ def apply_pending(
                     f"observation #{source_id} no longer matches the request"
                 )
         items, rejected, retired, deferred_ids = validate_result(pending, result, policy)
+        if already_applied:
+            offered = {entry["source_id"] for entry in pending["deferred"]} | {
+                entry["id"] for entry in pending["observations"]
+            }
+            applied_deferred = {
+                record.source_id: record.reason
+                for record in base.deferred
+                if record.source_id in offered
+            }
+            if (
+                items == base.items
+                and rejected == base.rejected
+                and retired == base.retired
+                and applied_deferred
+                == {
+                    entry["source_id"]: entry["reason"] for entry in result["deferred"]
+                }
+            ):
+                return base
+            raise ConsolidationError(
+                "conflicting result for an already applied consolidation request"
+            )
         payload, name = _enrich_validated_result(
             pending,
             result,
@@ -500,12 +558,6 @@ def apply_pending(
             retired=retired,
             deferred_ids=deferred_ids,
         )
-        if already_applied:
-            if base.generation == name:
-                return base
-            raise ConsolidationError(
-                "conflicting result for an already applied consolidation request"
-            )
         layout.secure()
         generation_path = layout.generations_dir / name
         if generation_path.exists():
@@ -521,9 +573,9 @@ def apply_pending(
         atomic_write_json(
             layout.current_path, {"request_id": request_id, "generation": name}
         )
-    generation = read_current(layout, scope)
-    if generation is None:  # unreachable: the pointer was just written
-        raise ConsolidationError("current generation missing after apply")
+        generation = read_current(layout, scope)
+        if generation is None:  # unreachable: the pointer was just written
+            raise ConsolidationError("current generation missing after apply")
     return generation
 
 
@@ -574,12 +626,33 @@ def consolidation_due(store: MemoryStore) -> tuple[int, bool]:
     return new, new >= ROUTINE_DUE_OBSERVATIONS
 
 
+def review_opportunity(
+    store: MemoryStore, current: IntegratedGeneration | None, total: int
+) -> tuple[int | None, str | None]:
+    """Return oldest unreviewed age and a bounded reason to review new evidence."""
+
+    checkpoint = current.source_count if current is not None else 0
+    new = total - checkpoint
+    if new <= 0:
+        return None, None
+    oldest = dt.datetime.fromisoformat(store.observation_at(checkpoint).recorded_at)
+    age = max(0, int((dt.datetime.fromisoformat(now()) - oldest).total_seconds()))
+    if new >= ROUTINE_DUE_OBSERVATIONS:
+        return age, "routine_batch"
+    if current is None:
+        return age, "initial_catalog"
+    if age >= SPARSE_REVIEW_AGE_SECONDS:
+        return age, "aged_candidates"
+    return age, None
+
+
 def pending_consolidation_counts(store: MemoryStore) -> tuple[int, int]:
     """Return actionable and total retained consolidation request counts."""
 
     layout = live_layout(store)
     current = read_current(layout, store.scope)
-    checkpoint = current.source_count if current is not None else -1
+    current_name = current.generation if current is not None else None
+    current_policy = policy_digest(fetch_policy())
     if not layout.pending_dir.is_dir():
         return 0, 0
     actionable = 0
@@ -588,7 +661,12 @@ def pending_consolidation_counts(store: MemoryStore) -> tuple[int, int]:
         pending = read_json(path)
         _validate_pending(pending, path.stem)
         retained += 1
-        if pending["source_count"] > checkpoint:
+        if (
+            pending["base_generation"] == current_name
+            and pending["policy_digest"] == current_policy
+            and pending["store_key"] == _store_key(store)
+            and (current is None or pending["request_id"] != current.request_id)
+        ):
             actionable += 1
     return actionable, retained
 

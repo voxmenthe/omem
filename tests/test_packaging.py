@@ -5,6 +5,7 @@ from importlib import resources
 from importlib.metadata import distribution
 
 from omem import __version__
+from omem.hook_context import CONTEXT_LIMIT_BYTES
 
 from .helpers import PROJECT
 
@@ -121,7 +122,7 @@ class PackagingTest(unittest.TestCase):
                     "command": "memory codex-hook",
                     "timeout": 3,
                     "statusMessage": "Loading memory turn context",
-                    "additionalContextLimit": 800,
+                    "additionalContextLimit": CONTEXT_LIMIT_BYTES,
                 }
             ],
         )

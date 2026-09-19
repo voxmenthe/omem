@@ -3,15 +3,17 @@
 Migration never mutates legacy files. Legacy notes are converted into a staged
 observation log under `consolidations/migration/`; each batch runs the ordinary
 bounded consolidation protocol against staging; the final batch's apply commits
-by copying staged artifacts into place and writing the observation log last,
-which activates the current layout atomically. Deleting the staging directory
+by copying staged artifacts into place and atomically publishing the complete
+observation log last. Deleting the staging directory
 abandons an interrupted migration with the legacy store unchanged.
 """
 
+import hashlib
 import json
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,7 @@ from .store import (
     OBSERVATION_RECORD_BYTES,
     MemoryStore,
     decode_observation_records,
+    observation_payload,
 )
 
 LEGACY_TRIGGER_CONTEXT = "Legacy raw note; original capture context unavailable"
@@ -229,6 +232,8 @@ def _commit(
     """Atomically activate the staged result; the observation log is written last."""
 
     with store.locked():
+        if store.uses_observation_log():
+            raise ConsolidationError("the store already migrated; staging is obsolete")
         if _fingerprint_payload(store._snapshot_locked()) != fingerprint:
             raise ConsolidationError(
                 "the legacy log changed during migration; staging is stale — "
@@ -244,14 +249,26 @@ def _commit(
             target = live / "generations" / generation_path.name
             atomic_write_json(target, read_json(generation_path))
         atomic_write_json(live / "current.json", read_json(layout.current_path))
-        # Activation marker: the observation log appears only once everything
-        # else is durable.
         data = layout.observations_path.read_bytes()
-        with store.observations_path.open("wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        secure_file(store.observations_path)
+        records = decode_observation_records(data, store.scope)
+        if len(records) != current.source_count:
+            raise ConsolidationError("staged observation count changed before activation")
+        descriptor, name = tempfile.mkstemp(prefix=".OBSERVATIONS-", dir=store.path)
+        temporary = Path(name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            # Readers use existence as the format marker: publish only complete bytes.
+            os.replace(temporary, store.observations_path)
+            directory_fd = os.open(store.path, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            temporary.unlink(missing_ok=True)
         shutil.rmtree(_staging_root(store))
 
 
@@ -310,3 +327,49 @@ def apply_migration(
         f"{remaining} legacy notes remain — run `memory migrate {store.scope}` "
         "for the next batch"
     )
+
+
+def recover_migration(store: MemoryStore) -> dict[str, Any]:
+    """Archive a proven incomplete activation marker and resume intact staging.
+
+    Refuse completed logs, changed legacy evidence, and bytes that do not match
+    a strict prefix of the fully reviewed staging log.
+    """
+
+    if not store.uses_observation_log():
+        return request_migration(store)
+    layout = _staging_layout(store)
+    with store.locked():
+        snapshot = read_json(_staging_root(store) / "snapshot.json")
+        fingerprint = _fingerprint_payload(store._snapshot_locked())
+        if any(snapshot.get(key) != value for key, value in fingerprint.items()):
+            raise ConsolidationError("legacy evidence changed; automatic recovery refused")
+        staged = read_current(layout, store.scope)
+        data = layout.observations_path.read_bytes()
+        observations = decode_observation_records(data, store.scope)
+        if (
+            staged is None
+            or staged.source_count != fingerprint["note_count"]
+            or len(observations) != fingerprint["note_count"]
+            or read_json(store.path / "consolidations" / "current.json")
+            != read_json(layout.current_path)
+        ):
+            raise ConsolidationError("recovery requires complete, matching migration staging")
+        if [observation_payload(record) for record in observations] != [
+            _legacy_observation_payload(note) for note in store._snapshot_locked()
+        ]:
+            raise ConsolidationError("staged observations differ from legacy evidence; recovery refused")
+        partial = store.observations_path.read_bytes()
+        if len(partial) >= len(data) or not data.startswith(partial):
+            raise ConsolidationError("live log is not an incomplete staging prefix; recovery refused")
+        suffix = hashlib.sha256(partial).hexdigest()[:16]
+        archive = store.path / f"OBSERVATIONS.interrupted-{suffix}.log"
+        if archive.exists():
+            raise ConsolidationError(f"recovery archive already exists: {archive}")
+        os.replace(store.observations_path, archive)
+        directory_fd = os.open(store.path, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    return request_migration(store)

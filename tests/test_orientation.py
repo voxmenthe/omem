@@ -10,6 +10,7 @@ from unittest import mock
 
 from omem.consolidation import apply_consolidation, request_consolidation
 from omem.dreams import apply_dream, request_dream
+from omem.hook_context import CONTEXT_LIMIT_BYTES, build_hook_context
 from omem.layout import current_repo, scope_path
 from omem.models import DreamArtifact
 from omem.orientation import (
@@ -162,6 +163,69 @@ class IntegratedOrientationTest(unittest.TestCase):
         self.assertEqual(len(result.items), 1)
         self.assertTrue(result.items[0].source.startswith("self:integrated:"))
 
+    def test_hook_one_record_budget_delivers_stronger_repo_match(self) -> None:
+        for store, claim, label in (
+            (self.self_store, "Prefer bounded changes", "user"),
+            (self.repo_store, "release-procedure uses bounded changes", "observed"),
+        ):
+            store.append_observation("fact", label, claim, "review")
+            self._integrate(store, claim, [0], "Preparing changes")
+        context = build_hook_context(
+            event_kind="turn", query="release-procedure uses bounded changes",
+            cwd=self.repo, store_root=self.root, max_context_bytes=650,
+        )
+        self.assertIn("release-procedure uses bounded changes", context)
+        self.assertNotIn("Prefer bounded changes", context)
+        self.assertLessEqual(len(context.encode("utf-8")), 650)
+
+    def test_hook_can_deliver_maximum_length_escaped_integrated_item(self) -> None:
+        self.repo_store.append_observation("procedure", "observed", "delivery-marker", "review")
+        claim = "delivery-marker " + "\x01" * (280 - len("delivery-marker "))
+        when = "\x02" * 280
+        self._integrate(self.repo_store, claim, [0], when)
+        context = build_hook_context(
+            event_kind="turn", query="delivery-marker", cwd=self.repo, store_root=self.root,
+        )
+        self.assertIn('"claim":', context)
+        records = [json.loads(line) for line in context.splitlines() if line.startswith('{')]
+        self.assertEqual(records[0]["claim"], claim)
+        self.assertEqual(records[0]["applies_when"], when)
+        self.assertLessEqual(len(context.encode("utf-8")), CONTEXT_LIMIT_BYTES)
+
+    def test_budget_skips_oversized_matches_before_applying_item_count(self) -> None:
+        self.repo_store.append_observation("procedure", "observed", "budget-marker", "review")
+        self._integrate(self.repo_store, "budget-marker " + "x" * 260, [0], "Across tasks")
+        self.self_store.append_observation("preference", "user", "budget-marker shorter", "review")
+        self._integrate(self.self_store, "budget-marker shorter", [0], "Across tasks")
+        from dataclasses import replace
+
+        result = fetch_orientation(replace(
+            self._request("budget-marker " + "x" * 260, max_bytes=400), max_items=1
+        ))
+        self.assertEqual([item.claim for item in result.items], ["budget-marker shorter"])
+
+    def test_inapplicable_matches_do_not_crowd_out_a_relevant_item(self) -> None:
+        for index in range(13):
+            self.repo_store.append_observation("procedure", "observed", f"candidate {index}", "review")
+        bundle = request_consolidation(self.repo_store)
+        items = [{
+            "kind": "procedure", "provenance": "observed",
+            "text": "storage memory narrow suite repeated failure",
+            "applicability": {"mode": "conditional", "when": "Deploying lunar spacecraft"},
+            "promotion_reason": "different context", "source_ids": [index],
+        } for index in range(12)]
+        items.append({
+            "kind": "procedure", "provenance": "observed", "text": "Use the storage memory suite",
+            "applicability": {"mode": "conditional", "when": "Changing memory storage"},
+            "promotion_reason": "relevant context", "source_ids": [12],
+        })
+        apply_consolidation(bundle["request_id"], {
+            **{key:bundle[key] for key in ("scope","base_generation","source_count","policy_digest")},
+            "items": items, "deferred": [], "rejected": [], "retired": [],
+        })
+        result = fetch_orientation(self._request("storage memory narrow suite repeated failure"))
+        self.assertEqual([item.claim for item in result.items], ["Use the storage memory suite"])
+
 
 class SelectorFixtureTest(unittest.TestCase):
     def test_exact_selector_and_rendering_fixtures(self) -> None:
@@ -302,7 +366,7 @@ class OrientationServiceTest(unittest.TestCase):
 
         self.assertEqual(
             [item.source for item in result.items],
-            ["self:raw:0", "repo:raw:0"],
+            ["repo:raw:0", "self:raw:0"],
         )
         self.assertIsNone(result.abstention_reason)
         self.assertEqual(result.rendered.count("\n"), 2)

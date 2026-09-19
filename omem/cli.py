@@ -15,7 +15,9 @@ from .config import (
     CONFIG_NAME,
     HOST_ENV,
     HOSTS,
+    ITEM_BUDGET,
     ROOT_ENV,
+    WAKE_ITEM_BUDGET,
     ConfigError,
     config_path,
     fetch_policy,
@@ -27,6 +29,7 @@ from .consolidation import (
     consolidation_failure_summary,
     pending_consolidation_counts,
     request_consolidation,
+    review_opportunity,
 )
 from .dreams import (
     DREAM_DUE_NOTES,
@@ -39,6 +42,7 @@ from .dreams import (
     validate_current_sources,
 )
 from .generations import (
+    catalog_outcome,
     load_current_generation,
     validate_generation_sources,
 )
@@ -61,7 +65,7 @@ from .models import (
     MemoryError,
     Scope,
 )
-from .migration import apply_migration, request_migration
+from .migration import apply_migration, recover_migration, request_migration
 from .orientation import OrientationRequest, fetch_orientation
 from .store import POST_DREAM_RAW, MemoryStore
 
@@ -82,6 +86,7 @@ Usage:
   memory [--host codex|claude] consolidate <scope>
   memory [--host codex|claude] consolidate apply <request-id>    # result JSON on stdin
   memory [--host codex|claude] migrate <scope>
+  memory [--host codex|claude] migrate recover <scope>         # interrupted legacy activation
   memory [--host codex|claude] migrate apply <request-id>        # result JSON on stdin
   memory [--host codex|claude] status
 
@@ -215,6 +220,12 @@ Consolidation protocol:
   evidence, obey its contract and citations, then pipe the exact JSON to
   `memory consolidate apply <request-id>`.
 
+  review_recommended=yes also surfaces an initial catalog or new evidence
+  waiting seven days. These invite judgment, not automatic promotion. When a
+  backlog competes with new observations, up to 64 of the 256 slots are reserved
+  for new evidence; unoffered deferred records carry forward unchanged. Do not
+  repeatedly review unchanged deferred evidence without a new reason.
+
   Judge recurrence by independent occasions, not repeated narration of one
   incident. Weigh source authority, contextual agreement, durability, and
   expected future value together; no duplicate count promotes by itself. If
@@ -239,6 +250,11 @@ Optional pruning and storage policy:
     self_catalog_target = 16
     repo_catalog_target = 24
 
+  Each scope admits at most 128 eligible items. Targets (1..128) guide optional
+  pruning, not admission. Wake shows up to 16 personal and 24 repository items,
+  prioritizing invariants and explicit user choices, then newest support;
+  recall/orient search the full catalog.
+
   An absent file, absent [storage] section, or absent mode means pooled: every
   host shares <root>/self and <root>/repos/<repo-id>. With per-host mode each
   host resolves an independent namespace under <root>/hosts/<host>/; a valid
@@ -262,6 +278,11 @@ Legacy migration:
   archive. Deleting <store>/consolidations/migration abandons a staged
   migration safely. Observations written after migration are not visible to an
   old binary; do not run mixed-version writers against one store.
+
+  A failure before activation leaves legacy reads intact; rerun migrate. For
+  an older incomplete activation marker, `memory migrate recover <scope>`
+  verifies unchanged legacy evidence and fully reviewed staging, archives a
+  matching partial marker, and resumes. Completed or nonmatching logs are refused.
 
   The CLI does not call a model. Consolidation is explicit work performed by
   the acting primary agent. Maintenance failure must not block normal work.
@@ -370,12 +391,27 @@ def _render_current_scope(scope: Scope, store: MemoryStore) -> list[str]:
     checkpoint = generation.source_count if generation is not None else 0
     deferred = len(generation.deferred) if generation is not None else 0
     if generation is not None:
-        for item in generation.items:
+        visible = sorted(
+            enumerate(generation.items),
+            key=lambda pair: (
+                pair[1].kind == "invariant",
+                pair[1].provenance == "user",
+                max(pair[1].source_ids),
+            ),
+            reverse=True,
+        )[: WAKE_ITEM_BUDGET[scope]]
+        for _, item in sorted(visible):
             citations = ",".join(f"#{source_id}" for source_id in item.source_ids)
             lines.append(
                 f"[{scope}|integrated|{item.provenance}|sources:{citations}] "
                 f"{item.kind}: {item.text} "
                 f"Applies when: {item.applicability.when}"
+            )
+        omitted = integrated - len(visible)
+        if omitted:
+            lines.append(
+                f"[{scope}|catalog] omitted_integrated={omitted}; "
+                f"use `memory recall {scope} <regex>` or `memory orient <query>`"
             )
     elif issue is None:
         lines.append(
@@ -383,10 +419,12 @@ def _render_current_scope(scope: Scope, store: MemoryStore) -> list[str]:
             f"run `memory consolidate {scope}` to integrate them"
         )
     new = max(0, total - checkpoint)
+    _, review_reason = review_opportunity(store, generation, total)
     lines.append(
         f"[{scope}|state] candidates={total} integrated={integrated} "
         f"checkpoint={checkpoint} new_candidates={new} deferred={deferred} "
         f"consolidation_due={'yes' if new >= ROUTINE_DUE_OBSERVATIONS else 'no'} "
+        f"review_recommended={'yes' if review_reason else 'no'} "
         f"bytes={store.bytes_used()}"
     )
     return lines
@@ -858,8 +896,11 @@ def _status_current(scope: Scope, store: MemoryStore) -> None:
     issue: str | None = None
     try:
         generation = load_current_generation(store)
+        if generation is not None:
+            validate_generation_sources(store, generation)
     except ConsolidationError as error:
         issue = str(error)
+        generation = None
     integrated = len(generation.items) if generation is not None else 0
     checkpoint = generation.source_count if generation is not None else 0
     deferred = generation.deferred if generation is not None else ()
@@ -887,17 +928,27 @@ def _status_current(scope: Scope, store: MemoryStore) -> None:
     shown_policy = effective or policy
     pruning = shown_policy.catalog_pruning if shown_policy else "unknown"
     target = shown_policy.catalog_target(scope) if shown_policy else "unknown"
+    oldest_age, review_reason = review_opportunity(store, generation, total)
+    capacity_blocked = (
+        integrated >= ITEM_BUDGET[scope] and pruning == "off" and bool(new or deferred)
+    )
     print(
         f"{scope}: path={store.path} schema=current candidates={total} "
         f"integrated={integrated} checkpoint={checkpoint} new_candidates={new} "
-        f"deferred={len(deferred)} rejected={rejected_count} "
-        f"retired={len(retired)} pruning={pruning} catalog_target={target} "
+        f"deferred={len(deferred)} generation_rejected={rejected_count} "
+        f"generation_retired={len(retired)} pruning={pruning} catalog_target={target} "
+        f"catalog_limit={ITEM_BUDGET[scope]} "
+        f"capacity_blocked={'yes' if capacity_blocked else 'no'} "
         f"consolidation_due={'yes' if new >= ROUTINE_DUE_OBSERVATIONS else 'no'} "
+        f"review_recommended={'yes' if review_reason else 'no'} "
+        f"review_reason={review_reason or 'none'} "
         f"current_generation={current_name} "
         f"pending_consolidations={pending_count} "
         f"retained_consolidation_requests={retained_count} "
         f"failures={failure_count} bytes={store.bytes_used()}"
     )
+    if oldest_age is not None:
+        print(f"{scope}: oldest_unreviewed_age_seconds={oldest_age}")
     if deferred:
         oldest = min(
             dt.datetime.fromisoformat(record.first_reviewed) for record in deferred
@@ -923,7 +974,10 @@ def _status_current(scope: Scope, store: MemoryStore) -> None:
                 ).total_seconds()
             ),
         )
-        print(f"{scope}: last_consolidation_age_seconds={age}")
+        print(
+            f"{scope}: last_consolidation_age_seconds={age} "
+            f"catalog_outcome={catalog_outcome(store, generation)}"
+        )
     if failure is not None:
         print(
             f"{scope}: latest_consolidation_failure={failure.get('at')} "
@@ -1090,10 +1144,14 @@ def command_migrate(args: Sequence[str], context: StoreContext) -> int:
             raise ConsolidationError("migration result must be a JSON object")
         print(apply_migration(request_id, value, context=context))
         return 0
+    recover = len(args) == 2 and args[0] == "recover"
+    if recover:
+        args = args[1:]
     if len(args) != 1 or args[0] not in ("self", "repo"):
-        raise MemoryError("migrate requires <self|repo> or apply <request-id>")
+        raise MemoryError("migrate requires <self|repo>, recover <scope>, or apply <request-id>")
     scope: Scope = args[0]  # type: ignore[assignment]
-    bundle = request_migration(_store(scope, context))
+    operation = recover_migration if recover else request_migration
+    bundle = operation(_store(scope, context))
     if bundle.get("protocol") == "memory-migration-complete":
         print(f"migration committed for {scope}")
         return 0

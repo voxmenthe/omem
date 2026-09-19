@@ -409,17 +409,7 @@ def _select_candidates(
         (value for value in admitted if value.candidate.source not in suppressed),
         key=_rank_key,
     )
-    selected: list[_ScoredCandidate] = []
-    for scope in _SCOPE_ORDER:
-        best = next(
-            (value for value in eligible if value.candidate.scope == scope), None
-        )
-        if best is not None:
-            selected.append(best)
-    for value in eligible:
-        if value not in selected:
-            selected.append(value)
-    return tuple(selected[:max_items])
+    return tuple(eligible[:max_items])
 
 
 def _render_items(items: Sequence[_ScoredCandidate], *, max_bytes: int) -> str:
@@ -430,13 +420,15 @@ def _render_items(items: Sequence[_ScoredCandidate], *, max_bytes: int) -> str:
 
 
 def _render_complete_items(
-    items: Sequence[_ScoredCandidate], *, max_bytes: int
+    items: Sequence[_ScoredCandidate], *, max_bytes: int, max_items: int = 3
 ) -> tuple[str, tuple[_ScoredCandidate, ...]]:
     """Return the complete records admitted by the byte budget."""
 
     lines = [EVIDENCE_WARNING]
     emitted: list[_ScoredCandidate] = []
     for value in items:
+        if len(emitted) >= max_items:
+            break
         candidate = value.candidate
         record_payload: dict[str, str] = {
             "scope": candidate.scope,
@@ -504,6 +496,17 @@ def _retain_candidate(
     scored = _score_candidate(query, candidate)
     if scored.score < ADMISSION_SCORE:
         return
+    bonus = _admission_bonus(query, candidate)
+    if bonus is None:
+        return
+    if bonus:
+        scored = _ScoredCandidate(
+            candidate=candidate,
+            score=scored.score + bonus,
+            evidence=scored.evidence,
+            structural_evidence=scored.structural_evidence,
+            normalized_claim=scored.normalized_claim,
+        )
     retained.append(scored)
     retained.sort(key=_rank_key)
     del retained[RETAINED_CANDIDATES_PER_SCOPE:]
@@ -719,11 +722,12 @@ def fetch_orientation(
         selected = _select_candidates(
             request.query,
             candidates,
-            max_items=min(3, request.max_items),
+            max_items=len(candidates),
         )
         rendered, emitted = _render_complete_items(
             selected,
             max_bytes=request.max_evidence_bytes,
+            max_items=min(3, request.max_items),
         )
         _check_deadline(request.deadline, clock)
     except _DeadlineExpired:

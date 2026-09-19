@@ -452,6 +452,20 @@ def validate_generation_sources(
             )
 
 
+def catalog_outcome(store: MemoryStore, generation: IntegratedGeneration) -> str:
+    """Compare usable item content with the preceding immutable generation."""
+
+    if generation.base_generation is None:
+        return "initial"
+    name = generation.base_generation
+    previous = _generation_from_payload(
+        name, read_json(live_layout(store).generations_dir / name), store.scope
+    )
+    before = sorted(canonical_digest(item_payload(item)) for item in previous.items)
+    after = sorted(canonical_digest(item_payload(item)) for item in generation.items)
+    return "unchanged" if before == after else "changed"
+
+
 def record_failure(layout: GenerationLayout, request_id: str, reason: str) -> None:
     layout.secure()
     entry = json.dumps(

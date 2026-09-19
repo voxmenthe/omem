@@ -223,7 +223,7 @@ class HostHookTest(unittest.TestCase):
         )
         self.assertEqual(applied.returncode, 0, applied.stderr)
 
-    def test_codex_hook_adds_only_complete_matching_evidence_within_800_bytes(
+    def test_codex_hook_adds_only_complete_matching_evidence_within_context_limit(
         self,
     ) -> None:
         self._hook("init")
@@ -257,7 +257,7 @@ class HostHookTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         context = payload["hookSpecificOutput"]["additionalContext"]
-        self.assertLessEqual(len(context.encode("utf-8")), 800)
+        self.assertLessEqual(len(context.encode("utf-8")), hook_context.CONTEXT_LIMIT_BYTES)
         checkpoint, evidence = context.split("\n\n", 1)
         instructions = (PROJECT / "INSTRUCTIONS.md").read_text(encoding="utf-8")
         expected = instructions.split(
@@ -562,7 +562,7 @@ class HostHookTest(unittest.TestCase):
             "additionalContext"
         ]
         self.assertIn("pooling-sentinel-procedure keeps stores shared", context)
-        self.assertLessEqual(len(context.encode("utf-8")), 800)
+        self.assertLessEqual(len(context.encode("utf-8")), hook_context.CONTEXT_LIMIT_BYTES)
 
     def test_claude_hook_fails_open_on_malformed_input_with_host_label(
         self,

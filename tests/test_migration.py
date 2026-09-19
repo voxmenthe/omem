@@ -15,6 +15,7 @@ from omem.migration import (
     _staging_root,
     apply_migration,
     request_migration,
+    recover_migration,
 )
 from omem.models import ConsolidationError
 from omem.store import MemoryStore
@@ -127,6 +128,79 @@ class MigrationTest(unittest.TestCase):
         dream = request_dream(self.store)
         self.assertEqual(dream["source_count"], 2)
 
+    def test_interruption_before_activation_leaves_legacy_readable_and_retryable(self) -> None:
+        self._note("legacy lesson")
+        legacy = self.store.log_path.read_bytes()
+        bundle = request_migration(self.store)
+        replace = os.replace
+
+        def fail_activation(source, target):
+            if Path(target) == self.store.observations_path:
+                self.assertEqual(Path(source).stat().st_size, 2048)
+                self.assertFalse(self.store.uses_observation_log())
+                raise OSError("interrupted before activation")
+            return replace(source, target)
+
+        with mock.patch("omem.migration.os.replace", side_effect=fail_activation):
+            with self.assertRaisesRegex(OSError, "before activation"):
+                apply_migration(
+                    bundle["request_id"],
+                    _result(bundle, deferred=[{"source_id": 0, "reason": "needs context"}]),
+                )
+        self.assertFalse(self.store.uses_observation_log())
+        self.assertEqual(self.store.snapshot()[0].text, "legacy lesson")
+        self.assertEqual(self.store.log_path.read_bytes(), legacy)
+        retry = request_migration(self.store)
+        self.assertEqual(retry["protocol"], "memory-migration-complete")
+        self.assertEqual(self.store.observation_count(), 1)
+        self.assertEqual(load_current_generation(self.store).deferred[0].review_count, 1)
+
+    def test_interruption_after_activation_exposes_complete_log(self) -> None:
+        self._note("legacy lesson")
+        legacy = self.store.log_path.read_bytes()
+        bundle = request_migration(self.store)
+        with mock.patch("omem.migration.shutil.rmtree", side_effect=OSError("cleanup interrupted")):
+            with self.assertRaisesRegex(OSError, "cleanup interrupted"):
+                apply_migration(
+                    bundle["request_id"],
+                    _result(bundle, deferred=[{"source_id": 0, "reason": "needs context"}]),
+                )
+        self.assertEqual(self.store.observation_count(), 1)
+        self.assertEqual(self.store.observation_at(0).text, "legacy lesson")
+        self.assertEqual(self.store.log_path.read_bytes(), legacy)
+        self.store.append_observation("fact", "observed", "new lesson", "after activation")
+        self.assertEqual(self.store.observation_count(), 2)
+        with self.assertRaisesRegex(ConsolidationError, "already uses"):
+            request_migration(self.store)
+
+    def test_recover_old_partial_marker_preserves_bytes_and_rejects_other_logs(self) -> None:
+        self._note("legacy lesson")
+        bundle = request_migration(self.store)
+        with mock.patch("omem.migration._commit", side_effect=OSError("old activation")):
+            with self.assertRaises(OSError):
+                apply_migration(bundle["request_id"], _result(
+                    bundle, deferred=[{"source_id": 0, "reason": "needs support"}]
+                ))
+        import shutil
+
+        staging = _staging_root(self.store)
+        shutil.copytree(staging / "generations", self.store.path / "consolidations" / "generations", dirs_exist_ok=True)
+        shutil.copyfile(staging / "current.json", self.store.path / "consolidations" / "current.json")
+        complete = (staging / "OBSERVATIONS.log").read_bytes()
+        for unsafe in (b"unrelated bytes", complete, complete + b"new data"):
+            self.store.observations_path.write_bytes(unsafe)
+            with self.assertRaisesRegex(ConsolidationError, "recovery refused"):
+                recover_migration(self.store)
+            self.assertEqual(self.store.observations_path.read_bytes(), unsafe)
+        partial = complete[:100]
+        self.store.observations_path.write_bytes(partial)
+        result = recover_migration(self.store)
+        self.assertEqual(result["protocol"], "memory-migration-complete")
+        self.assertEqual(self.store.observations_path.read_bytes(), complete)
+        archives = list(self.store.path.glob("OBSERVATIONS.interrupted-*.log"))
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(archives[0].read_bytes(), partial)
+
     def test_failed_bootstrap_never_activates_the_new_layout(self) -> None:
         self._note("legacy lesson")
         bundle = request_migration(self.store)
@@ -215,29 +289,17 @@ class MigrationTest(unittest.TestCase):
         self.assertIn("4 legacy notes remain", message)
         self.assertFalse(self.store.uses_observation_log())
 
-        # The deferred backlog alone fills the next request; headroom must be
-        # restored before new notes can advance.
-        bundle = request_migration(self.store)
-        self.assertEqual(bundle["source_count"], 256)
-        self.assertTrue(bundle["headroom_required"])
-        self.assertEqual(len(bundle["deferred"]), 256)
-        apply_migration(
-            bundle["request_id"],
-            _result(
-                bundle,
-                rejected=[
-                    {"source_id": index, "reason": "no reuse evidence"}
-                    for index in range(256)
-                ],
-            ),
-        )
-
+        # New evidence advances without requiring old candidates to be discarded.
         bundle = request_migration(self.store)
         self.assertEqual(bundle["source_count"], total)
+        self.assertFalse(bundle["headroom_required"])
+        self.assertEqual(len(bundle["deferred"]), 252)
         message = apply_migration(
             bundle["request_id"],
             _result(
                 bundle,
+                deferred=[{"source_id": entry["source_id"], "reason": "needs context"}
+                          for entry in bundle["deferred"]],
                 rejected=[
                     {"source_id": index, "reason": "no reuse evidence"}
                     for index in range(256, total)
@@ -247,6 +309,7 @@ class MigrationTest(unittest.TestCase):
         self.assertIn("migration committed", message)
         self.assertTrue(self.store.uses_observation_log())
         self.assertEqual(self.store.observation_count(), total)
+        self.assertEqual(len(load_current_generation(self.store).deferred), 256)
 
     def test_config_change_during_bootstrap_makes_apply_stale(self) -> None:
         self._note("legacy lesson")

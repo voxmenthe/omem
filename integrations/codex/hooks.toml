@@ -11,7 +11,8 @@ type = "command"
 command = "memory codex-hook"
 timeout = 3
 statusMessage = "Loading memory turn context"
-additionalContextLimit = 800
+# Codex counts approximate tokens; OMem separately caps output at 4,096 bytes.
+additionalContextLimit = 4096
 
 [[hooks.SessionStart]]
 matcher = "^compact$"
