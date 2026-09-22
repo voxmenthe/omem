@@ -14,13 +14,14 @@ from typing import Sequence
 from .config import (
     CONFIG_NAME,
     HOST_ENV,
-    HOSTS,
     ITEM_BUDGET,
     ROOT_ENV,
     WAKE_ITEM_BUDGET,
     ConfigError,
     config_path,
+    consolidation_refusal,
     fetch_policy,
+    load_consolidation_trust,
 )
 from .consolidation import (
     ROUTINE_DUE_OBSERVATIONS,
@@ -47,6 +48,7 @@ from .generations import (
     validate_generation_sources,
 )
 from .host_hook import command_host_hook
+from .hosts import HOOK_HOSTS, HOST_SLUG
 from .layout import (
     CODEX_NATIVE_MEMORY_SCOPE_ERROR,
     StoreContext,
@@ -78,43 +80,52 @@ FALLIBILITY_NOTICE = (
 USAGE = """memory - scoped, auditable memory for coding agents
 
 Usage:
-  memory [--host codex|claude] init
-  memory [--host codex|claude] wake
-  memory [--host codex|claude] orient [--explain] "<query>"
-  memory [--host codex|claude] note <scope>:<kind>:<provenance> --context "<trigger context>" "<candidate>"
-  memory [--host codex|claude] recall <scope> <regex>
-  memory [--host codex|claude] consolidate <scope>
-  memory [--host codex|claude] consolidate apply <request-id>    # result JSON on stdin
-  memory [--host codex|claude] migrate <scope>
-  memory [--host codex|claude] migrate recover <scope>         # interrupted legacy activation
-  memory [--host codex|claude] migrate apply <request-id>        # result JSON on stdin
-  memory [--host codex|claude] status
+  memory [--host <host>] init
+  memory [--host <host>] wake
+  memory [--host <host>] orient [--explain] "<query>"
+  memory [--host <host>] note <scope>:<kind>:<provenance> --context "<trigger context>" "<candidate>"
+  memory [--host <host>] recall <scope> <regex>
+  memory [--host <host>] consolidate <scope>
+  memory [--host <host>] consolidate apply <request-id>    # result JSON on stdin
+  memory [--host <host>] migrate <scope>
+  memory [--host <host>] migrate recover <scope>         # interrupted legacy activation
+  memory [--host <host>] migrate apply <request-id>        # result JSON on stdin
+  memory [--host <host>] status
+  memory instructions                # print the packaged agent instruction block
 
 Maintenance audit (unintegrated evidence, not usable memory):
-  memory [--host codex|claude] candidates <scope> <regex>
+  memory [--host <host>] candidates <scope> <regex>
 
 Legacy stores, until migrated:
-  memory [--host codex|claude] note <scope>:<kind>:<provenance> "<text>"
-  memory [--host codex|claude] nap [scope]
-  memory [--host codex|claude] nap <scope> <lo>-<hi> "<summary>"
-  memory [--host codex|claude] dream <scope>                     # deprecated alias for consolidate
-  memory [--host codex|claude] dream apply <dream-id>
+  memory [--host <host>] note <scope>:<kind>:<provenance> "<text>"
+  memory [--host <host>] nap [scope]
+  memory [--host <host>] nap <scope> <lo>-<hi> "<summary>"
+  memory [--host <host>] dream <scope>                     # deprecated alias for consolidate
+  memory [--host <host>] dream apply <dream-id>
 
 Optional integrations:
   memory hook codex          # equivalent to the compatibility alias below
   memory codex-hook
   memory hook claude
+  memory hook devin
+  memory hook kimi           # plain-text context; Kimi Code appends stdout
   memory review-sessions <session-path> [<session-path> ...]
 
 Host selection:
-  `--host` (or the OMEM_HOST environment variable bound inside a host's own
-  settings) selects which host is running. In pooled storage mode it only
-  labels diagnostics; in per-host mode it selects an independent namespace
-  under <root>/hosts/<host>/ and is required.
+  `--host <host>` (or the OMEM_HOST environment variable bound inside a host's
+  own settings) names the running host with a lowercase slug such as codex,
+  claude, devin, kimi, or grok. Any coding agent may record candidates. The
+  host decides whether consolidation is allowed when [hosts] lists trusted
+  hosts, and whether wake asks the agent to orient manually because the host
+  has no OMem prompt hook. In per-host storage mode it also selects the
+  namespace under <root>/hosts/<host>/ and is required. When no host is
+  bound, pass --host on consolidation and migration commands.
 
 Session workflow:
   1. Run `memory wake` at session start. Read its bounded self and current-repo
-     integrated memories before relying on prior memory.
+     integrated memories before relying on prior memory. If wake reports that
+     this host has no OMem prompt hook, run `memory orient "<task summary>"`
+     before substantive work on a task.
   2. During work, record candidate observations with `memory note ... --context
      ...` whenever a plausible, safely supported future decision signal
      appears. Candidates are hidden evidence, visible to no normal read
@@ -213,7 +224,9 @@ What to record:
 
 Consolidation protocol:
   When status reports consolidation_due=yes, finish the primary task first,
-  then run `memory consolidate <scope>`. It prints and saves a bounded request:
+  then run `memory consolidate <scope>`. If status reports
+  consolidation_trust=no, this host may not consolidate: leave the backlog
+  for a trusted host and say so at handoff. It prints and saves a bounded request:
   the current integrated items, the evidence they cite, deferred candidates
   with their review history, and the next contiguous batch of new observations
   (at most 256 offered per request). Produce result JSON from only that
@@ -249,6 +262,14 @@ Optional pruning and storage policy:
     catalog_pruning = "off"       # off | conservative | balanced | aggressive
     self_catalog_target = 16
     repo_catalog_target = 24
+
+    [hosts]
+    consolidation_trusted = ["codex", "claude", "devin", "kimi"]
+
+  A present hosts.consolidation_trusted list restricts consolidate, migrate,
+  and the legacy dream and nap commands to the named hosts; an unbound host
+  is refused. An absent list leaves consolidation unrestricted. Recording
+  candidates and reading memory are never restricted by host.
 
   Each scope admits at most 128 eligible items. Targets (1..128) guide optional
   pruning, not admission. Wake shows up to 16 personal and 24 repository items,
@@ -559,6 +580,15 @@ def command_orient(args: Sequence[str], context: StoreContext) -> int:
     return 0
 
 
+def command_instructions(args: Sequence[str]) -> int:
+    """Print the packaged instruction block for merging into agent guidance."""
+
+    if args:
+        raise MemoryError("instructions takes no arguments")
+    sys.stdout.write(_read_packaged_text("INSTRUCTIONS.md"))
+    return 0
+
+
 def command_review_sessions(args: Sequence[str]) -> int:
     """Print a manual reviewer prompt for a bounded explicit file list."""
 
@@ -597,6 +627,11 @@ def command_wake(args: Sequence[str], context: StoreContext) -> int:
         except (MemoryError, OSError) as error:
             lines.append(f"== {scope} ==")
             lines.append(f"[{scope}|degraded] {error}")
+    if context.host is not None and context.host not in HOOK_HOSTS:
+        lines.append(
+            f"[host|{context.host}] no OMem prompt hook for this host; before "
+            'substantive work on a task, run `memory orient "<task summary>"`'
+        )
     sys.stdout.write(_render_with_metrics(lines))
     return 0
 
@@ -1091,13 +1126,30 @@ def command_status(
             )
     else:
         hosts_dir = context.config_root / "hosts"
-        inactive_hosts = [
-            host
-            for host in HOSTS
-            if (hosts_dir / host).is_dir() and not (hosts_dir / host).is_symlink()
-        ]
+        inactive_hosts = sorted(
+            child.name
+            for child in (hosts_dir.iterdir() if hosts_dir.is_dir() else ())
+            if child.is_dir()
+            and not child.is_symlink()
+            and HOST_SLUG.fullmatch(child.name)
+        )
         if inactive_hosts:
             print(f"inactive_hosts={','.join(inactive_hosts)}")
+    try:
+        trusted = load_consolidation_trust()
+    except ConfigError as error:
+        print(f"consolidation_trust=error {error}")
+    else:
+        if trusted is None:
+            print("consolidation_trust=unrestricted")
+        else:
+            refusal = consolidation_refusal(context.host, trusted)
+            print(
+                f"consolidation_trust={'no' if refusal else 'yes'} "
+                f"trusted_hosts={','.join(sorted(trusted)) or 'none'}"
+            )
+            if refusal:
+                print(f"consolidation_refusal={refusal}")
     config = config_path()
     try:
         policy = fetch_policy()
@@ -1163,6 +1215,7 @@ COMMANDS = {
     "init": command_init,
     "orient": command_orient,
     "hook": command_host_hook,
+    "instructions": command_instructions,
     "review-sessions": command_review_sessions,
     "wake": command_wake,
     "note": command_note,
@@ -1175,13 +1228,17 @@ COMMANDS = {
     "status": command_status,
 }
 
+# Commands that turn evidence into agent-visible memory; gated by [hosts].
+MAINTENANCE_COMMANDS = frozenset({"consolidate", "dream", "migrate", "nap"})
+
+
 def _parse_global_host(arguments: list[str]) -> tuple[str | None, list[str]]:
     """Split a leading --host <value> from the remaining arguments."""
 
     if len(arguments) >= 2 and arguments[0] == "--host":
         return arguments[1], arguments[2:]
     if arguments and arguments[0] == "--host":
-        raise MemoryError("--host requires one of: " + ", ".join(HOSTS))
+        raise MemoryError("--host requires a lowercase host slug such as codex")
     if any(argument == "--host" for argument in arguments[1:]):
         raise MemoryError("--host must appear immediately after `memory`")
     return None, arguments
@@ -1205,11 +1262,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"error: unknown command {arguments[0]!r}", file=sys.stderr)
             print(USAGE.rstrip(), file=sys.stderr)
             return 2
-        if command is command_review_sessions:
+        if command is command_review_sessions or command is command_instructions:
             return command(arguments[1:])
         if command is command_host_hook:
             return command_host_hook(arguments[1:], explicit_host)
         context = resolve_store_context(explicit_host)
+        if arguments[0] in MAINTENANCE_COMMANDS:
+            refusal = consolidation_refusal(
+                context.host, load_consolidation_trust()
+            )
+            if refusal is not None:
+                raise MemoryError(refusal)
         if command is command_status:
             return command_status(arguments[1:], context, explicit_host)
         return command(arguments[1:], context)

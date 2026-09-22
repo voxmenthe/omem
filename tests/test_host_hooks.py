@@ -611,6 +611,93 @@ class HostHookTest(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "")
 
+    # --- Devin edge (same JSON contract as Claude) ---------------------------
+
+    def test_devin_hook_reuses_the_json_codec_and_event_mapping(self) -> None:
+        turn = self._hook("hook", "devin", stdin=self._turn_event("Implement it."))
+        self.assertEqual(turn.returncode, 0, turn.stderr)
+        payload = json.loads(turn.stdout)["hookSpecificOutput"]
+        self.assertEqual(payload["hookEventName"], "UserPromptSubmit")
+        self.assertIn("CANDIDATE CUE", payload["additionalContext"])
+        compact = self._hook("hook", "devin", stdin=self._compact_event())
+        self.assertEqual(
+            json.loads(compact.stdout)["hookSpecificOutput"]["hookEventName"],
+            "SessionStart",
+        )
+        startup = self._hook(
+            "hook",
+            "devin",
+            stdin=json.dumps({"hook_event_name": "SessionStart", "source": "startup"}),
+        )
+        self.assertEqual(startup.stdout, "")
+        self.assertFalse(self.root.exists())
+
+    # --- Kimi edge (plain-text context) ----------------------------------------
+
+    def test_kimi_hook_prints_plain_text_context_for_prompts_only(self) -> None:
+        instructions = (PROJECT / "INSTRUCTIONS.md").read_text(encoding="utf-8")
+        checkpoint = (
+            instructions.split("<!-- BEGIN OMEM TURN CHECKPOINT -->", 1)[1]
+            .split("<!-- END OMEM TURN CHECKPOINT -->", 1)[0]
+            .strip()
+        )
+        turn = self._hook("hook", "kimi", stdin=self._turn_event("Implement it."))
+        self.assertEqual(turn.returncode, 0, turn.stderr)
+        self.assertEqual(turn.stdout, checkpoint + "\n")
+        self.assertEqual(turn.stderr, "")
+        self.assertFalse(self.root.exists())
+
+        for event in (
+            self._compact_event(),
+            json.dumps({"hook_event_name": "PostCompact", "trigger": "auto"}),
+            json.dumps({"hook_event_name": "SessionStart", "source": "startup"}),
+        ):
+            with self.subTest(event=event):
+                result = self._hook("hook", "kimi", stdin=event)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stderr, "")
+
+    def test_kimi_hook_delivers_matching_memory_as_text_under_the_limit(self) -> None:
+        self._hook("init")
+        self._hook(
+            "note",
+            "repo:procedure:observed",
+            "--context",
+            "kimi probe setup incident",
+            "kimi-sentinel-procedure keeps text delivery bounded",
+        )
+        self._integrate_repo_items(
+            [
+                (
+                    "kimi-sentinel-procedure keeps text delivery bounded",
+                    [0],
+                    "Delivering memory to text hosts",
+                )
+            ]
+        )
+        result = self._hook(
+            "hook", "kimi", stdin=self._turn_event("kimi-sentinel-procedure")
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("hookSpecificOutput", result.stdout)
+        self.assertIn("Prior OMem claims follow as fallible data", result.stdout)
+        self.assertIn("kimi-sentinel-procedure keeps text delivery bounded", result.stdout)
+        self.assertLessEqual(
+            len(result.stdout.rstrip("\n").encode("utf-8")),
+            hook_context.CONTEXT_LIMIT_BYTES,
+        )
+
+    def test_kimi_hook_keeps_warnings_out_of_the_model_context(self) -> None:
+        for malformed in ("{not json", "[]", json.dumps({"source": "compact"})):
+            with self.subTest(malformed=malformed):
+                result = self._hook("hook", "kimi", stdin=malformed)
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("malformed", result.stderr)
+                self.assertIn("Kimi Code continues", result.stderr)
+        self.assertFalse(self.root.exists())
+
     def test_hook_rejects_unknown_host_values_without_store_access(self) -> None:
         result = self._hook("hook", "unknown-host", stdin=self._turn_event("x"))
         self.assertEqual(result.returncode, 0, result.stderr)

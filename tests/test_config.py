@@ -10,7 +10,9 @@ from omem.config import (
     DEFAULT_POLICY,
     ConfigError,
     config_path,
+    consolidation_refusal,
     fetch_policy,
+    load_consolidation_trust,
     load_storage_mode,
     memory_root,
     parse_host,
@@ -125,7 +127,10 @@ class HostSelectionTest(unittest.TestCase):
         env.update(overrides)
         return env
 
-    def test_allow_list_rejects_everything_else_before_paths(self) -> None:
+    def test_host_slugs_are_open_but_path_safe(self) -> None:
+        for value in ("codex", "claude", "devin", "kimi", "grok", "command-code", "pi"):
+            with self.subTest(value=value):
+                self.assertEqual(parse_host(value), value)
         bad_values = (
             "",
             "CODEX",
@@ -135,15 +140,15 @@ class HostSelectionTest(unittest.TestCase):
             "..\\codex",
             "../codex",
             ".",
-            "unknown",
+            "-codex",
+            "x" * 33,
             3,
             None,
         )
         for value in bad_values:
             with self.subTest(value=value):
-                with self.assertRaises(Exception) as caught:
+                with self.assertRaises(ConfigError):
                     parse_host(value)
-                self.assertNotIsInstance(caught.exception, OSError)
 
     def test_pooled_mode_permits_no_host_and_both_hosts(self) -> None:
         none_ctx = resolve_store_context(None, self._env())
@@ -167,7 +172,7 @@ class HostSelectionTest(unittest.TestCase):
 
     def test_invalid_environment_host_fails_even_in_pooled_mode(self) -> None:
         with self.assertRaises(Exception):
-            resolve_store_context(None, self._env(OMEM_HOST="typo-host"))
+            resolve_store_context(None, self._env(OMEM_HOST="Typo Host"))
         self.assertFalse(self.root.exists())
 
     def test_per_host_mode_requires_a_host(self) -> None:
@@ -181,6 +186,61 @@ class HostSelectionTest(unittest.TestCase):
         self.assertEqual(codex_ctx.store_root, self.root / "hosts" / "codex")
         claude_ctx = resolve_store_context(None, self._env(OMEM_HOST="claude"))
         self.assertEqual(claude_ctx.store_root, self.root / "hosts" / "claude")
+
+
+class ConsolidationTrustTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name) / "memory"
+        self.env = {"MEMORY_V0_DIR": str(self.root)}
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _write(self, text: str) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        config_path(self.env).write_text(text, encoding="utf-8")
+
+    def test_absent_file_section_or_key_means_unrestricted(self) -> None:
+        self.assertIsNone(load_consolidation_trust(self.env))
+        for text in ('[storage]\nmode = "pooled"\n', "[hosts]\n"):
+            with self.subTest(text=text):
+                self._write(text)
+                self.assertIsNone(load_consolidation_trust(self.env))
+
+    def test_present_list_is_exact_including_empty(self) -> None:
+        self._write('[hosts]\nconsolidation_trusted = ["kimi", "codex"]\n')
+        self.assertEqual(load_consolidation_trust(self.env), frozenset({"kimi", "codex"}))
+        self._write("[hosts]\nconsolidation_trusted = []\n")
+        self.assertEqual(load_consolidation_trust(self.env), frozenset())
+
+    def test_malformed_hosts_fail_trust_only(self) -> None:
+        for text in (
+            "hosts = 1\n",
+            '[hosts]\nconsolidation_trusted = "kimi"\n',
+            '[hosts]\nconsolidation_trusted = ["Kimi"]\n',
+            '[hosts]\nconsolidation_trusted = [1]\n',
+            "[hosts]\nother = 1\n",
+        ):
+            with self.subTest(text=text):
+                self._write(text)
+                with self.assertRaises(ConfigError):
+                    load_consolidation_trust(self.env)
+                self.assertEqual(load_storage_mode(self.env), "pooled")
+                self.assertEqual(fetch_policy(self.env), DEFAULT_POLICY)
+
+    def test_refusal_names_the_host_and_the_trusted_set(self) -> None:
+        self.assertIsNone(consolidation_refusal(None, None))
+        self.assertIsNone(consolidation_refusal("grok", None))
+        self.assertIsNone(consolidation_refusal("kimi", frozenset({"kimi"})))
+        unbound = consolidation_refusal(None, frozenset({"kimi", "codex"}))
+        self.assertIn("requires a trusted host", unbound)
+        self.assertIn("trusted: codex, kimi", unbound)
+        self.assertIn("OMEM_HOST", unbound)
+        untrusted = consolidation_refusal("grok", frozenset({"kimi"}))
+        self.assertIn("host grok is not trusted to consolidate", untrusted)
+        nobody = consolidation_refusal("kimi", frozenset())
+        self.assertIn("trusted: none", nobody)
 
 
 if __name__ == "__main__":

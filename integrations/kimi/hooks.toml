@@ -1,0 +1,9 @@
+# OMem Kimi Code integration: one read-only prompt hook.
+# Append to the [[hooks]] array in ~/.kimi-code/config.toml. Kimi accepts only
+# event, matcher, command, and timeout here, and it appends the command's
+# stdout to the model context. Kimi has no post-compaction context route.
+
+[[hooks]]
+event = "UserPromptSubmit"
+command = "memory hook kimi"
+timeout = 3

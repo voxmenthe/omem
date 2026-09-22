@@ -13,7 +13,6 @@ from typing import Any, Callable, Mapping
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from .config import (
-    HOSTS,
     HOST_ENV,
     ROOT_ENV,
     Host,
@@ -65,8 +64,7 @@ class StoreContext:
     """One immutable storage decision resolved once per invocation.
 
     Host identity selects a namespace before any scope path is built; it is
-    never a record field, a semantic scope, or a path fragment outside the
-    validated allow-list.
+    never a record field, a semantic scope, or an unvalidated path fragment.
     """
 
     config_root: Path
@@ -104,7 +102,7 @@ def resolve_store_context(
     if mode == "per-host":
         if host is None:
             raise MemoryError(
-                f"per-host storage requires a host: pass --host <{'|'.join(HOSTS)}> "
+                "per-host storage requires a host: pass --host <host> "
                 f"or set {HOST_ENV} inside the host's own settings"
             )
         store_root = config_root / "hosts" / host

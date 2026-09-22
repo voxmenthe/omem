@@ -181,6 +181,22 @@ class PackagingTest(unittest.TestCase):
             ],
         )
 
+    def test_tracked_kimi_hook_uses_only_the_four_allowed_fields(self) -> None:
+        import tomllib
+
+        config = tomllib.loads(
+            (PROJECT / "integrations" / "kimi" / "hooks.toml").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(set(config), {"hooks"})
+        self.assertEqual(len(config["hooks"]), 1)
+        (hook,) = config["hooks"]
+        self.assertLessEqual(set(hook), {"event", "matcher", "command", "timeout"})
+        self.assertEqual(hook["event"], "UserPromptSubmit")
+        self.assertEqual(hook["command"], "memory hook kimi")
+        self.assertEqual(hook["timeout"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

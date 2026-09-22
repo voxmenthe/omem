@@ -46,7 +46,9 @@ class CliTest(unittest.TestCase):
             "memory consolidate",
             "memory migrate",
             "candidates <scope> <regex>",
-            "--host codex|claude",
+            "--host <host>",
+            "memory instructions",
+            "consolidation_trusted",
             "Choosing note metadata:",
             "self kinds: fact, preference, episode",
             "repo kinds: fact, invariant, procedure, preference",
@@ -67,6 +69,91 @@ class CliTest(unittest.TestCase):
             "current instruction.",
         ):
             self.assertIn(expected, outputs[0])
+
+    def test_instructions_prints_the_packaged_block_without_touching_storage(
+        self,
+    ) -> None:
+        result = run_memory(self.root, "instructions", cwd=self.repo)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout,
+            (PROJECT / "INSTRUCTIONS.md").read_text(encoding="utf-8"),
+        )
+        self.assertFalse(self.root.exists())
+        rejected = run_memory(self.root, "instructions", "extra", cwd=self.repo)
+        self.assertEqual(rejected.returncode, 2)
+
+    def test_wake_asks_only_hookless_bound_hosts_to_orient_manually(self) -> None:
+        run_memory(self.root, "init", cwd=self.repo)
+        hookless = run_memory(self.root, "--host", "grok", "wake", cwd=self.repo)
+        self.assertEqual(hookless.returncode, 0, hookless.stderr)
+        self.assertIn(
+            '[host|grok] no OMem prompt hook for this host; before substantive '
+            'work on a task, run `memory orient "<task summary>"`',
+            hookless.stdout,
+        )
+        for arguments in (("wake",), ("--host", "kimi", "wake"), ("--host", "claude", "wake")):
+            with self.subTest(arguments=arguments):
+                result = run_memory(self.root, *arguments, cwd=self.repo)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("[host|", result.stdout)
+
+    def test_trusted_host_list_gates_maintenance_but_never_candidates(self) -> None:
+        run_memory(self.root, "init", cwd=self.repo)
+        (self.root / "config.toml").write_text(
+            '[hosts]\nconsolidation_trusted = ["codex", "claude", "devin", "kimi"]\n',
+            encoding="utf-8",
+        )
+        for host_arguments in ((), ("--host", "grok")):
+            noted = run_memory(
+                self.root,
+                *host_arguments,
+                "note",
+                "repo:fact:observed",
+                "--context",
+                "trust gate fixture",
+                "any host may record a candidate",
+                cwd=self.repo,
+            )
+            self.assertEqual(noted.returncode, 0, noted.stderr)
+
+        unbound = run_memory(self.root, "consolidate", "repo", cwd=self.repo)
+        self.assertEqual(unbound.returncode, 2)
+        self.assertIn("requires a trusted host", unbound.stderr)
+        self.assertIn("claude, codex, devin, kimi", unbound.stderr)
+        for command in (("consolidate", "repo"), ("migrate", "repo"), ("dream", "repo"), ("nap",)):
+            with self.subTest(command=command):
+                untrusted = run_memory(
+                    self.root, "--host", "grok", *command, cwd=self.repo
+                )
+                self.assertEqual(untrusted.returncode, 2)
+                self.assertIn("host grok is not trusted to consolidate", untrusted.stderr)
+        trusted = run_memory(self.root, "--host", "kimi", "consolidate", "repo", cwd=self.repo)
+        self.assertEqual(trusted.returncode, 0, trusted.stderr)
+        self.assertIn("request_id", json.loads(trusted.stdout))
+
+        unbound_status = run_memory(self.root, "status", cwd=self.repo)
+        self.assertIn(
+            "consolidation_trust=no trusted_hosts=claude,codex,devin,kimi",
+            unbound_status.stdout,
+        )
+        self.assertIn("consolidation_refusal=consolidation requires a trusted host", unbound_status.stdout)
+        trusted_status = run_memory(self.root, "--host", "devin", "status", cwd=self.repo)
+        self.assertIn("consolidation_trust=yes trusted_hosts=claude,codex,devin,kimi", trusted_status.stdout)
+        self.assertNotIn("consolidation_refusal=", trusted_status.stdout)
+
+        (self.root / "config.toml").write_text(
+            '[hosts]\nconsolidation_trusted = "kimi"\n', encoding="utf-8"
+        )
+        malformed = run_memory(self.root, "--host", "kimi", "consolidate", "repo", cwd=self.repo)
+        self.assertEqual(malformed.returncode, 2)
+        self.assertIn("must be an array of lowercase host slugs", malformed.stderr)
+        status = run_memory(self.root, "status", cwd=self.repo)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn("consolidation_trust=error", status.stdout)
+        wake = run_memory(self.root, "wake", cwd=self.repo)
+        self.assertEqual(wake.returncode, 0, wake.stderr)
+        self.assertIn("== repo ==", wake.stdout)
 
     def test_agent_guidance_defines_process_lesson_admission_contract(self) -> None:
         help_result = run_memory(self.root, "help", cwd=self.repo)

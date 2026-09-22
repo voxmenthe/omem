@@ -105,7 +105,7 @@ class HostRoutingTest(unittest.TestCase):
         self.assertEqual(pooled.returncode, 0, pooled.stderr)
         self.assertIn("matches=0", pooled.stdout)
         status = run_memory(self.root, "status", cwd=self.repo)
-        self.assertIn("inactive_hosts=codex,claude", status.stdout)
+        self.assertIn("inactive_hosts=claude,codex", status.stdout)
 
         self._set_mode("per-host")
         self.assertIn(

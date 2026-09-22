@@ -20,18 +20,21 @@ downloads that interpreter when it is not already available.
 
 ## Complete installation
 
-For an end-to-end Codex installation:
+For an end-to-end installation:
 
 1. [Install the `memory` command](#install-the-command-for-use-in-other-repositories)
    from a clone, then run `memory init` followed by `memory wake` in the target
    repository.
 2. [Merge the agent instruction block](#install-the-agent-instructions) into
-   the target repository's `AGENTS.md`, preserving any existing instructions.
-3. [Merge and trust the two global hooks](#install-the-optional-global-hooks)
-   from [`integrations/codex/hooks.toml`](integrations/codex/hooks.toml).
-4. Start a fresh Codex session in the target repository. Confirm the agent
-   runs `memory init` and `memory wake`, then use `/hooks` to confirm exactly
-   one enabled OMem handler for each configured event.
+   the instruction file each agent reads, preserving any existing
+   instructions.
+3. [Name the hosts allowed to consolidate](#choose-which-hosts-may-consolidate)
+   in the root config.
+4. [Install the optional hooks](#install-the-optional-hooks) for the hosts
+   you use: Codex, Claude Code (which also covers Devin), and Kimi Code.
+5. Start a fresh session in the target repository. Confirm the agent runs
+   `memory init` and `memory wake`, and that the host shows exactly one
+   enabled OMem handler for each configured event (in Codex, use `/hooks`).
 
 The prompt hook supplies a canonical checkpoint plus bounded automatic
 orientation when relevant evidence is available; the compaction hook supplies
@@ -56,8 +59,8 @@ guess a target repository, move existing notes, or synchronize native memory.
 ## Choose the storage mode
 
 By default OMem is pooled: every host shares `<root>/self` and
-`<root>/repos/<repo-id>`, and no host selection is needed. To keep Codex and
-Claude Code memory apart, create `$MEMORY_V0_DIR/config.toml`
+`<root>/repos/<repo-id>`, and no host selection is needed. To keep each
+host's memory apart, create `$MEMORY_V0_DIR/config.toml`
 (`~/.memory-v0/config.toml` by default) with:
 
 ```toml
@@ -66,20 +69,46 @@ mode = "per-host"
 ```
 
 In per-host mode each host uses `<root>/hosts/<host>/`, and every command
-must know which host is running. Agents get this from the `OMEM_HOST`
-binding inside each host's own settings: the tracked Codex fragment sets it
-through `shell_environment_policy`, and the tracked Claude settings set it
-through `env`. From a plain terminal, pass `--host codex` or `--host claude`
-immediately after `memory`, for example `memory --host codex wake`. A missing
-host, an unknown host, or a `--host` value that conflicts with `OMEM_HOST`
-fails before any store is read; OMem never falls back to pooled storage on a
-bad configuration. In pooled mode `--host` is accepted and only labels
-diagnostics.
+must know which host is running. Codex and Claude Code get this from the
+`OMEM_HOST` binding inside their own settings: the tracked Codex fragment sets
+it through `shell_environment_policy`, and the tracked Claude settings set it
+through `env`. Elsewhere, and from a plain terminal, pass `--host <host>`
+immediately after `memory`, for example `memory --host kimi wake`. A host is
+a lowercase name such as `kimi`. A missing host, an invalid host name, or a
+`--host` value that conflicts with `OMEM_HOST` fails before any store is
+read; OMem never falls back to pooled storage on a bad configuration. In
+pooled mode `--host` is accepted, labels diagnostics, and decides
+[consolidation trust](#choose-which-hosts-may-consolidate).
 
 Switching modes never copies, merges, or deletes data. The other namespace
 stays on disk, and `memory status` shows `storage_mode`, `host`, `store_root`,
 and whether inactive pooled or per-host data exists. Run `memory init` once
 in each namespace you use.
+
+## Choose which hosts may consolidate
+
+Any host may record candidates and read memory. To restrict consolidation and
+migration to the hosts you trust, add to the same `config.toml`:
+
+```toml
+[hosts]
+consolidation_trusted = ["codex", "claude", "devin", "kimi"]
+```
+
+With the list present, `memory consolidate`, `memory migrate`, `memory dream`,
+and `memory nap` run only when the resolved host is listed. An unlisted host,
+or a command that has no host at all, exits with status 2 and a message naming
+the trusted hosts. `memory init`, `memory note`, `memory wake`,
+`memory orient`, `memory recall`, `memory status`, and the hooks are never
+gated. Without the list every host may consolidate; an empty list allows none,
+which pauses maintenance. A malformed `[hosts]` section blocks only the gated
+commands and shows as `consolidation_trust=error` in `memory status`.
+
+Codex and Claude Code learn their host from the `OMEM_HOST` binding in the
+tracked fragments. Devin and Kimi Code have no equivalent setting, so an agent
+there passes `--host devin` or `--host kimi` immediately after `memory` on the
+gated commands; the packaged instructions say so. The list is a guardrail for
+agents that follow instructions, not a security boundary.
 
 ## Run from the checkout for development
 
@@ -128,7 +157,8 @@ uv tool update-shell
 ```
 
 UV places tool executables in the directory printed by `uv tool dir --bin`.
-That directory must also be on the environment `PATH` used to launch Codex.
+That directory must also be on the environment `PATH` used to launch each
+host.
 
 A contributor who wants source edits to affect the global command immediately
 can replace the normal installation with:
@@ -143,16 +173,29 @@ Refresh a normal non-editable installation after pulling a new version with
 
 ## Install the agent instructions
 
-Merge the contents of [`INSTRUCTIONS.md`](INSTRUCTIONS.md) into the target
-repository's root `AGENTS.md`.
+`memory instructions` prints the packaged [`INSTRUCTIONS.md`](INSTRUCTIONS.md)
+block. Merge it into the instruction file that each agent reads in the target
+repository, wrapped in a short policy of your own; the
+[README](README.md#3-give-your-coding-agent-the-memory-workflow) shows an
+example.
 
-- The block tells the primary agent to wake memory at session start, record
-  candidate observations with their trigger context, and perform due
-  consolidations.
+| Host | Repository instruction file |
+| --- | --- |
+| Codex, Kimi Code, and most other agents | `AGENTS.md` |
+| Claude Code | `CLAUDE.md` |
+| Devin | Claude Code's files, through its Claude import |
+| Gemini CLI | `GEMINI.md` |
+| Cursor | `.cursor/rules/*.mdc` |
+
+- The block tells the primary agent to wake memory at session start, orient
+  when the host has no prompt hook, record candidate observations with their
+  trigger context, and perform due consolidations only on a trusted host.
 - Put the same block in global agent instructions only if you want self memory
   available across every repository.
 - Merge the block with any existing instructions; do not overwrite unrelated
   repository policy.
+- Rerun `memory instructions` and replace the block after upgrading OMem; the
+  CLI and its instructions evolve together.
 - This checkout intentionally does not install or edit agent instructions for
   you.
 
@@ -186,10 +229,12 @@ uv lock --check
 Commit `pyproject.toml` and `uv.lock` together after an intentional dependency
 change.
 
-## Install the optional global hooks
+## Install the optional hooks
 
-The optional integration does not replace startup `memory wake`. It installs
-two read-only handlers in one global user hook source:
+The optional integration does not replace startup `memory wake`. This section
+describes the Codex handlers; [Claude Code](#claude-code), [Devin](#devin),
+and [Kimi Code](#kimi-code) follow. Codex installs two read-only handlers in
+one global user hook source:
 
 - `UserPromptSubmit` adds the marked turn checkpoint and, when the bounded
   selector finds relevant evidence, zero to three escaped records from existing
@@ -295,20 +340,16 @@ without preventing compaction or normal continuation.
 The hook must remain read-only. `note` and `consolidate` stay under acting
 primary-agent control.
 
-### Claude Code preview
+### Claude Code
 
-[`integrations/claude/settings.json`](integrations/claude/settings.json) is the
-Claude Code counterpart: it binds `OMEM_HOST=claude` and registers
-`memory hook claude` for `UserPromptSubmit` and for `SessionStart` with the
-`compact` matcher. It shares the hook builder, deadline, byte ceiling, and
-fail-open behavior described above, but it has not passed the live prompt and
-compaction validation that the Codex hooks have, so it is not yet supported.
-
-To try it, merge the file's `env` and `hooks` entries into
-`~/.claude/settings.json` (or a project `.claude/settings.json`) without
-replacing existing entries, and put the [`INSTRUCTIONS.md`](INSTRUCTIONS.md)
-block in the `CLAUDE.md` that Claude Code reads. Verify the adapter outside
-Claude Code:
+[`integrations/claude/settings.json`](integrations/claude/settings.json) binds
+`OMEM_HOST=claude` and registers `memory hook claude` for `UserPromptSubmit`
+and for `SessionStart` with the `compact` matcher. It shares the hook builder,
+deadline, byte ceiling, and fail-open behavior described above. Merge its
+`env` and `hooks` entries into `~/.claude/settings.json` (or a project
+`.claude/settings.json`) without replacing existing entries, and put the
+instruction block in the `CLAUDE.md` that Claude Code reads. Verify the
+adapter outside Claude Code:
 
 ```sh
 printf '%s\n' \
@@ -319,8 +360,50 @@ printf '%s\n' \
   | memory hook claude
 ```
 
-The outputs match the Codex commands above. Run the same fresh-session,
-`/compact`, and failure checks listed for Codex before relying on it.
+The outputs match the Codex commands above. Then start a fresh `claude`
+session in an initialized repository and confirm that the first prompt shows
+one turn checkpoint and that `/compact` is followed by one recovery
+checkpoint. The prompt route is validated in a headless `claude -p` session
+that received the turn checkpoint; the compaction route has not been
+validated live.
+
+### Devin
+
+Devin reads the hooks in `~/.claude/settings.json` when
+`read_config_from.claude` is enabled in `~/.config/devin/config.json`, which
+is the default, so the Claude Code entries above already reach Devin. Do not
+add a second copy, or each prompt receives the checkpoint twice. If you have
+turned that import off, register `memory hook devin` for the same two events
+under `hooks` in `~/.config/devin/config.json`, using the Claude Code hook
+shape. Devin honors `additionalContext` for `UserPromptSubmit` and
+`SessionStart` but not for its `PostCompaction` event, so OMem registers none.
+Verify the adapter by piping the two events above to `memory hook devin`.
+Devin has no `OMEM_HOST` binding, so pass `--host devin` on consolidation and
+migration commands. The Devin routes have not been validated in a live
+session: the CLI refuses to run non-interactively in an untrusted workspace,
+and the compaction behavior is taken from Devin's documentation.
+
+### Kimi Code
+
+Kimi Code appends a hook's standard output to the prompt as plain text and
+accepts only `event`, `matcher`, `command`, and `timeout` in a `[[hooks]]`
+entry. Append [`integrations/kimi/hooks.toml`](integrations/kimi/hooks.toml)
+to `~/.kimi-code/config.toml`, keeping the existing contents, and put the
+instruction block in the `AGENTS.md` that Kimi reads. `memory hook kimi`
+prints the turn checkpoint and any evidence as text, prints warnings to
+standard error so they never reach the prompt, and prints nothing for events
+it does not serve. Kimi has no compaction event OMem can use and no
+`OMEM_HOST` binding, so pass `--host kimi` on consolidation and migration
+commands. Verify the adapter outside Kimi:
+
+```sh
+printf '%s\n' \
+  '{"hook_event_name":"UserPromptSubmit","prompt":"test"}' \
+  | memory hook kimi
+```
+
+The Kimi route is validated in a headless `kimi -p` session that received
+the turn checkpoint as a `UserPromptSubmit hook` block.
 
 ## Run an optional post-hoc review
 
@@ -346,9 +429,10 @@ To disable only automatic orientation, remove the `UserPromptSubmit` handler
 with command `memory codex-hook`; the stored data, manual command, and compact
 recovery handler remain unchanged. For full uninstall, also remove the
 `SessionStart`/`^compact$` handler and confirm both are absent through `/hooks`.
-If you tried the Claude Code preview, also remove its two `memory hook claude`
-handlers and the `OMEM_HOST` entry from the Claude Code settings you edited.
-Then remove the globally available command with:
+For Claude Code (and Devin, which imports them), also remove the two
+`memory hook claude` handlers and the `OMEM_HOST` entry from the Claude Code
+settings you edited; for Kimi Code, remove the `memory hook kimi` entry from
+`~/.kimi-code/config.toml`. Then remove the globally available command with:
 
 ```sh
 uv tool uninstall scoped-omem
