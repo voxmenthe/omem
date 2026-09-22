@@ -53,6 +53,34 @@ intended task repository. Recognized `~/.codex-state/repos/*/memories`,
 but refuse OMem repo scope and suppress OMem hook output. The command does not
 guess a target repository, move existing notes, or synchronize native memory.
 
+## Choose the storage mode
+
+By default OMem is pooled: every host shares `<root>/self` and
+`<root>/repos/<repo-id>`, and no host selection is needed. To keep Codex and
+Claude Code memory apart, create `$MEMORY_V0_DIR/config.toml`
+(`~/.memory-v0/config.toml` by default) with:
+
+```toml
+[storage]
+mode = "per-host"
+```
+
+In per-host mode each host uses `<root>/hosts/<host>/`, and every command
+must know which host is running. Agents get this from the `OMEM_HOST`
+binding inside each host's own settings: the tracked Codex fragment sets it
+through `shell_environment_policy`, and the tracked Claude settings set it
+through `env`. From a plain terminal, pass `--host codex` or `--host claude`
+immediately after `memory`, for example `memory --host codex wake`. A missing
+host, an unknown host, or a `--host` value that conflicts with `OMEM_HOST`
+fails before any store is read; OMem never falls back to pooled storage on a
+bad configuration. In pooled mode `--host` is accepted and only labels
+diagnostics.
+
+Switching modes never copies, merges, or deletes data. The other namespace
+stays on disk, and `memory status` shows `storage_mode`, `host`, `store_root`,
+and whether inactive pooled or per-host data exists. Run `memory init` once
+in each namespace you use.
+
 ## Run from the checkout for development
 
 This is the contributor workflow; it is not required for normal installation.
@@ -267,6 +295,33 @@ without preventing compaction or normal continuation.
 The hook must remain read-only. `note` and `consolidate` stay under acting
 primary-agent control.
 
+### Claude Code preview
+
+[`integrations/claude/settings.json`](integrations/claude/settings.json) is the
+Claude Code counterpart: it binds `OMEM_HOST=claude` and registers
+`memory hook claude` for `UserPromptSubmit` and for `SessionStart` with the
+`compact` matcher. It shares the hook builder, deadline, byte ceiling, and
+fail-open behavior described above, but it has not passed the live prompt and
+compaction validation that the Codex hooks have, so it is not yet supported.
+
+To try it, merge the file's `env` and `hooks` entries into
+`~/.claude/settings.json` (or a project `.claude/settings.json`) without
+replacing existing entries, and put the [`INSTRUCTIONS.md`](INSTRUCTIONS.md)
+block in the `CLAUDE.md` that Claude Code reads. Verify the adapter outside
+Claude Code:
+
+```sh
+printf '%s\n' \
+  '{"hook_event_name":"UserPromptSubmit","prompt":"test"}' \
+  | memory hook claude
+printf '%s\n' \
+  '{"hook_event_name":"SessionStart","source":"compact"}' \
+  | memory hook claude
+```
+
+The outputs match the Codex commands above. Run the same fresh-session,
+`/compact`, and failure checks listed for Codex before relying on it.
+
 ## Run an optional post-hoc review
 
 Start a separate top-level maintenance session in the relevant repository and
@@ -291,6 +346,8 @@ To disable only automatic orientation, remove the `UserPromptSubmit` handler
 with command `memory codex-hook`; the stored data, manual command, and compact
 recovery handler remain unchanged. For full uninstall, also remove the
 `SessionStart`/`^compact$` handler and confirm both are absent through `/hooks`.
+If you tried the Claude Code preview, also remove its two `memory hook claude`
+handlers and the `OMEM_HOST` entry from the Claude Code settings you edited.
 Then remove the globally available command with:
 
 ```sh

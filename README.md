@@ -70,7 +70,9 @@ when you want an isolated trial.
 ### 3. Give your coding agent the memory workflow
 
 OMem currently supports only Codex.
-Support for Claude Code and other agents is coming soon.
+Support for Claude Code and other agents is coming soon. An unsupported
+Claude Code preview ships in the tree; see
+[Claude Code preview](#claude-code-preview).
 
 Merge [`INSTRUCTIONS.md`](INSTRUCTIONS.md) into the target repository's
 `AGENTS.md`. Keep the instructions that are already there. Start a fresh agent
@@ -131,6 +133,7 @@ memory candidates <scope> <regex>
 
 # Optional integrations
 memory codex-hook               # hook event JSON on stdin
+memory hook claude              # same contract; Claude Code preview
 memory review-sessions <session-path> [<session-path> ...]
 ```
 
@@ -245,6 +248,24 @@ It does not open the files, search for sessions, call a reviewer, or save
 memory. Run it from a separate session used for memory review. The review agent
 still decides what deserves a candidate. The prompt is in
 [`SESSION_REVIEW.md`](SESSION_REVIEW.md).
+
+## Claude Code preview
+
+[`integrations/claude/settings.json`](integrations/claude/settings.json) is a
+Claude Code adapter that has not passed live prompt and compaction
+validation, so it is not yet supported. It binds `OMEM_HOST=claude` and
+registers `memory hook claude` for `UserPromptSubmit` and for `SessionStart`
+with the `compact` matcher. Both routes use the same checkpoint builder,
+500 ms deadline, 4,096-byte ceiling, and fail-open behavior as the Codex
+hook.
+
+To try it, merge the file's `env` and `hooks` entries into your Claude Code
+settings (`~/.claude/settings.json`, or a project `.claude/settings.json`)
+without replacing existing entries, and put the
+[`INSTRUCTIONS.md`](INSTRUCTIONS.md) block in the `CLAUDE.md` that Claude
+Code reads. Verify the adapter outside Claude Code with the two event
+commands from [step 4](#4-enable-the-optional-codex-hooks), piped to
+`memory hook claude` instead of `memory codex-hook`.
 
 ## What `memory wake` shows
 
@@ -373,6 +394,9 @@ One optional root config file controls this —
 `$MEMORY_V0_DIR/config.toml` (or `~/.memory-v0/config.toml`):
 
 ```toml
+[storage]
+mode = "pooled"               # pooled | per-host; see Storage and failure boundaries
+
 [consolidation]
 catalog_pruning = "off"       # off | conservative | balanced | aggressive
 self_catalog_target = 16
@@ -435,7 +459,7 @@ the whole store for investigation if these checks fail.
 
 ```text
 ~/.memory-v0/
-  config.toml                      # optional consolidation policy
+  config.toml                      # optional storage mode and consolidation policy
   self/
     OBSERVATIONS.log               # fixed-width candidate records
     consolidations/{pending,generations,current.json,failures.jsonl}
@@ -445,7 +469,19 @@ the whole store for investigation if these checks fail.
       identity.json
       OBSERVATIONS.log
       consolidations/{pending,generations,current.json,failures.jsonl}
+  hosts/<codex|claude>/{self,repos}  # per-host mode only
 ```
+
+By default every host shares the pooled `self/` and `repos/` trees. Setting
+`mode = "per-host"` under `[storage]` in `config.toml` gives each host its own
+namespace under `hosts/<host>/`, and every command must then know its host:
+pass `--host codex|claude` immediately after `memory`, or set `OMEM_HOST`
+inside the host's own settings, as the tracked Codex and Claude integration
+files do. An explicit `--host` that disagrees with `OMEM_HOST` is an error,
+and an invalid `[storage]` section blocks store access rather than assuming
+pooled. Switching modes never copies, merges, or deletes data; the other
+namespace stays on disk, and `memory status` reports `storage_mode`, `host`,
+`store_root`, and any inactive pooled or per-host data.
 
 OMem creates directories with mode `0700` and managed files with mode `0600`.
 Observation records have a fixed width and carry canonical JSON. OMem assigns
@@ -518,8 +554,10 @@ establish improved agent decisions.
    stop automatic prompt lookup. Manual lookup and the compaction reminder keep
    working. Your data needs no conversion.
 2. Remove the `SessionStart`/`^compact$` handler for a full hook removal. Open
-   Codex `/hooks` and confirm that both OMem handlers are gone.
-3. Remove the OMem block from each `AGENTS.md` where you copied
+   Codex `/hooks` and confirm that both OMem handlers are gone. If you tried
+   the Claude Code preview, also remove its two `memory hook claude` handlers
+   and the `OMEM_HOST` entry from the Claude Code settings you edited.
+3. Remove the OMem block from each `AGENTS.md` or `CLAUDE.md` where you copied
    [`INSTRUCTIONS.md`](INSTRUCTIONS.md).
 4. Run `uv tool uninstall scoped-omem` if you installed OMem as a uv tool.
 5. Move the data to an archive that you can restore later:
