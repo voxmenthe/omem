@@ -38,7 +38,7 @@ TRUST_KEY: Final = "consolidation_trusted"
 ITEM_BUDGET: Final = {"self": 128, "repo": 128}
 WAKE_ITEM_BUDGET: Final = {"self": 16, "repo": 24}
 DEFAULT_POLICY: Final = ConsolidationPolicy(
-    catalog_pruning="off", self_catalog_target=16, repo_catalog_target=24
+    catalog_pruning="conservative", self_catalog_target=32, repo_catalog_target=48
 )
 
 
@@ -162,7 +162,7 @@ def fetch_policy(
         raise ConsolidationError(
             f"{path} has unknown consolidation keys: {', '.join(sorted(unknown))}"
         )
-    profile = section.get("catalog_pruning", "off")
+    profile = section.get("catalog_pruning", DEFAULT_POLICY.catalog_pruning)
     if not isinstance(profile, str) or profile not in PRUNING_PROFILES:
         allowed = ", ".join(PRUNING_PROFILES)
         raise ConsolidationError(

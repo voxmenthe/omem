@@ -259,9 +259,9 @@ Optional pruning and storage policy:
     mode = "pooled"               # pooled | per-host
 
     [consolidation]
-    catalog_pruning = "off"       # off | conservative | balanced | aggressive
-    self_catalog_target = 16
-    repo_catalog_target = 24
+    catalog_pruning = "conservative"  # off | conservative | balanced | aggressive
+    self_catalog_target = 32
+    repo_catalog_target = 48
 
     [hosts]
     consolidation_trusted = ["codex", "claude", "devin", "kimi"]
@@ -281,14 +281,14 @@ Optional pruning and storage policy:
   host resolves an independent namespace under <root>/hosts/<host>/; a valid
   host selection is then required before any store access. Switching modes
   never copies, merges, relabels, or deletes data; it only changes which
-  namespace is active. Inferred-staleness and capacity retirement of still-valid
-  items happen only under an explicit profile; capacity retirement additionally
-  requires target pressure, and age or review counts never act as automatic
-  deletion rules. A malformed config blocks consolidation requests and applies
-  and is visible in `memory status`; invalid storage configuration blocks store
-  access entirely instead of silently assuming pooled. It never disables wake,
-  recall, orient, or hook reads of a valid generation when the storage section
-  itself is valid.
+  namespace is active. Inferred-staleness and capacity retirement of
+  still-valid items happen only under a profile other than off (the default is
+  conservative); capacity retirement additionally requires target pressure, and
+  age or review counts never act as automatic deletion rules. A malformed
+  config blocks consolidation requests and applies and is visible in `memory
+  status`; invalid storage configuration blocks store access entirely instead
+  of silently assuming pooled. It never disables wake, recall, orient, or hook
+  reads of a valid generation when the storage section itself is valid.
 
 Legacy migration:
   Stores created before consolidation (raw LOG.txt with dreams and trees) keep

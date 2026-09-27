@@ -914,14 +914,14 @@ class CliTest(unittest.TestCase):
         self.assertEqual(status.returncode, 0, status.stderr)
         self.assertIn("schema=current", status.stdout)
         self.assertIn("candidates=1", status.stdout)
-        self.assertIn("pruning=off", status.stdout)
-        self.assertIn("catalog_target=16", status.stdout)
+        self.assertIn("pruning=conservative", status.stdout)
+        self.assertIn("catalog_target=32", status.stdout)
         self.assertIn("consolidation_due=no", status.stdout)
         self.assertIn("review_recommended=yes", status.stdout)
         self.assertIn("review_reason=initial_catalog", status.stdout)
         self.assertIn("oldest_unreviewed_age_seconds=", status.stdout)
         self.assertIn("config=", status.stdout)
-        self.assertIn("self_catalog_target=16", status.stdout)
+        self.assertIn("self_catalog_target=32", status.stdout)
 
         config_path = self.root / "config.toml"
         config_path.write_text(

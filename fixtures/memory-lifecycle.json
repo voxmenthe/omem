@@ -337,6 +337,7 @@
       "name": "mandatory_safety_retirement_off_profile",
       "scope": "repo",
       "comment": "A misleading integrated item is retired even with catalog_pruning off; its evidence survives.",
+      "config": {"catalog_pruning": "off"},
       "observations": [
         ["procedure", "observed", "Deploy with the legacy script", "the script was the documented path"],
         ["procedure", "user", "The legacy script was removed; use the module entry point", "user stated the repository change"]
@@ -464,6 +465,7 @@
       "name": "capacity_off_defers_promotion",
       "scope": "self",
       "comment": "With pruning off, catalog pressure defers a new promotion instead of evicting a valid item.",
+      "config": {"catalog_pruning": "off"},
       "observations": [
         ["preference", "user", "Prefer bounded changes", "stated preference"],
         ["preference", "user", "Prefer evidence-backed status updates", "new explicit preference"]
@@ -538,6 +540,7 @@
       "name": "age_is_not_proof",
       "scope": "repo",
       "comment": "An old but rare high-impact safeguard stays active; a staleness retirement under off fails.",
+      "config": {"catalog_pruning": "off"},
       "observations": [
         ["invariant", "user", "Never rewrite the fixture store in place", "user warned after a corruption incident"],
         ["fact", "observed", "Unrelated noise observation", "unrelated work"]

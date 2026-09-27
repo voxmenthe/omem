@@ -53,9 +53,9 @@ class PolicyTest(unittest.TestCase):
     def test_absent_config_yields_the_documented_default(self) -> None:
         policy = fetch_policy()
         self.assertEqual(policy, DEFAULT_POLICY)
-        self.assertEqual(policy.catalog_pruning, "off")
-        self.assertEqual(policy.catalog_target("self"), 16)
-        self.assertEqual(policy.catalog_target("repo"), 24)
+        self.assertEqual(policy.catalog_pruning, "conservative")
+        self.assertEqual(policy.catalog_target("self"), 32)
+        self.assertEqual(policy.catalog_target("repo"), 48)
         self.assertEqual(len(policy_digest(policy)), 64)
 
     def test_valid_non_default_profile_round_trips(self) -> None:
@@ -173,8 +173,8 @@ class ConsolidationTest(unittest.TestCase):
         self.assertEqual(bundle["source_checkpoint"], 0)
         self.assertEqual(bundle["source_count"], 1)
         self.assertEqual(bundle["item_budget"], ITEM_BUDGET["self"])
-        self.assertEqual(bundle["catalog_target"], 16)
-        self.assertEqual(bundle["policy"]["catalog_pruning"], "off")
+        self.assertEqual(bundle["catalog_target"], 32)
+        self.assertEqual(bundle["policy"]["catalog_pruning"], "conservative")
         self.assertEqual(bundle["observations"][0]["id"], first)
         self.assertEqual(bundle["observations"][0]["trigger_context"], "while testing")
         again = request_consolidation(self.store)
@@ -428,6 +428,9 @@ class ConsolidationTest(unittest.TestCase):
         validate_generation_sources(self.store, generation)
 
     def test_retirement_profile_gates(self) -> None:
+        self.root.joinpath("config.toml").write_text(
+            '[consolidation]\ncatalog_pruning = "off"\n', encoding="utf-8"
+        )
         self._observe("one")
         first_bundle = request_consolidation(self.store)
         apply_consolidation(
@@ -481,6 +484,33 @@ class ConsolidationTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ConsolidationError, "requires cited evidence"):
             apply_consolidation(bundle["request_id"], safety_without_evidence)
+
+    def test_default_profile_permits_staleness_retirement(self) -> None:
+        self._observe("one")
+        first_bundle = request_consolidation(self.store)
+        apply_consolidation(
+            first_bundle["request_id"],
+            self._result(first_bundle, items=[self._item("one", [0])]),
+        )
+        self._observe("two")
+        bundle = request_consolidation(self.store)
+        self.assertEqual(bundle["policy"]["catalog_pruning"], "conservative")
+
+        stale = self._result(
+            bundle,
+            items=[self._item("two", [1])],
+            retired=[
+                {
+                    "base_item_index": 0,
+                    "basis": "staleness",
+                    "reason": "narrow applicability and non-recurrence",
+                    "evidence_source_ids": [],
+                }
+            ],
+        )
+        generation = apply_consolidation(bundle["request_id"], stale)
+        self.assertEqual([item.text for item in generation.items], ["two"])
+        self.assertEqual(generation.retired[0].basis, "staleness")
 
     def test_capacity_retirement_requires_pressure_under_a_profile(self) -> None:
         self.root.joinpath("config.toml").write_text(

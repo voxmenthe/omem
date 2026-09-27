@@ -491,8 +491,8 @@ Three cleanup decisions stay separate:
 - **Safety retirement** of a contradicted, superseded, inapplicable, or
   misleading integrated item is mandatory in every profile and cites current
   evidence. An unresolved conflict leaves no active item.
-- **Inferred-staleness retirement** of a still-valid item needs an explicit
-  pruning profile and affirmative item-specific evidence.
+- **Inferred-staleness retirement** of a still-valid item needs a pruning
+  profile other than `off` and affirmative item-specific evidence.
 - **Capacity retirement** additionally requires the active catalog to exceed
   its configured target.
 
@@ -504,9 +504,9 @@ One optional root config file controls this —
 mode = "pooled"               # pooled | per-host; see Storage and failure boundaries
 
 [consolidation]
-catalog_pruning = "off"       # off | conservative | balanced | aggressive
-self_catalog_target = 16
-repo_catalog_target = 24
+catalog_pruning = "conservative"  # off | conservative | balanced | aggressive
+self_catalog_target = 32
+repo_catalog_target = 48
 
 [hosts]                       # see Hosts and consolidation trust
 consolidation_trusted = ["codex", "claude", "devin", "kimi"]
@@ -520,13 +520,21 @@ Use the updated CLI across all writers once a catalog exceeds the former 16/24
 limits; older binaries reject those larger catalogs. Existing generations and
 retained version-1 requests remain readable by the updated implementation.
 
-An absent file means `off` with 16/24 targets. `memory init` never creates the
-file. Profiles raise how much affirmative evidence suffices; age or a review
-count never acts as an automatic deletion rule under any profile. Unknown keys,
-bad types, unknown profiles, and out-of-range targets fail consolidation with a
-clear error and appear in `memory status`; they never break reads of an already
-valid generation. Nothing is physically deleted: retirement changes eligibility,
-and the evidence stays in the observation log and historical generations.
+An absent file, section, or key takes the values shown: `conservative` with
+32/48 targets. Under `conservative`, a catalog over its target can admit a new
+lesson by retiring a still-valid item only on clear item-specific evidence
+(effective redundancy, newly cheap recoverability, or strongly diminished
+decision value). Under `off`, only safety retirement is possible, so a full
+catalog defers every new promotion until an item is contradicted. A store
+without a config file that relied on the earlier `off` default changes behavior
+on upgrade; set `catalog_pruning = "off"` to keep it. `memory init` never
+creates the file. Profiles raise how much affirmative evidence suffices; age or
+a review count never acts as an automatic deletion rule under any profile.
+Unknown keys, bad types, unknown profiles, and out-of-range targets fail
+consolidation with a clear error and appear in `memory status`; they never
+break reads of an already valid generation. Nothing is physically deleted:
+retirement changes eligibility, and the evidence stays in the observation log
+and historical generations.
 
 ## Migrating a legacy store
 
