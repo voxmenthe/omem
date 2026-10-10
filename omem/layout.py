@@ -119,21 +119,31 @@ def default_context(environment: Mapping[str, str] | None = None) -> StoreContex
     return resolve_store_context(None, environment)
 
 
+_CODEX_MEMORY_DIRS = frozenset({"memories", "memories_v2"})
+_CODEX_ACCOUNT_HOME = re.compile(r"\.codex\d*")
+_CODEX_LAUNCHER_ROOT = re.compile(r"\.codex-(?:state|par)[A-Za-z0-9_.-]*")
+# Launchers nest homes up to bare/repos/<repo>/<variant> below their root.
+_CODEX_LAUNCHER_HOME_DEPTH = 4
+
+
+def _is_codex_home(path: Path) -> bool:
+    if _CODEX_ACCOUNT_HOME.fullmatch(path.name):
+        return True
+    for depth, ancestor in enumerate(path.parents, start=1):
+        if depth > _CODEX_LAUNCHER_HOME_DEPTH:
+            return False
+        if _CODEX_LAUNCHER_ROOT.fullmatch(ancestor.name):
+            return True
+    return False
+
+
 def is_codex_native_memory_path(path: Path) -> bool:
-    """Return whether path is in a recognized Codex-owned memory tree."""
+    """Return whether path is in a Codex home's own native-memory tree."""
 
     resolved = path.expanduser().resolve()
     for candidate in (resolved, *resolved.parents):
-        if candidate.name != "memories":
-            continue
-        parent = candidate.parent
-        if parent.name == ".codex":
-            return True
-        if parent.parent.name == ".codex-state" and parent.name.startswith("bare"):
-            return True
-        if (
-            parent.parent.name == "repos"
-            and parent.parent.parent.name == ".codex-state"
+        if candidate.name in _CODEX_MEMORY_DIRS and _is_codex_home(
+            candidate.parent
         ):
             return True
     return False

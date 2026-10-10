@@ -405,10 +405,22 @@ class RepositoryIdentityTest(unittest.TestCase):
     def test_recognizes_only_codex_native_memory_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
+            state = base / ".codex-state"
             native_roots = (
-                base / ".codex-state" / "repos" / "fixture-id" / "memories",
-                base / ".codex-state" / "bare.20260809-1234" / "memories",
+                state / "repos" / "fixture-id" / "memories",
+                state / "bare.20260809-1234" / "memories",
                 base / ".codex" / "memories",
+                # Observed account, launcher, and memories_v2 layouts.
+                base / ".codex2" / "memories",
+                base / ".codex" / "memories_v2",
+                base / ".codex-state2" / "repos" / "fixture-id" / "memories_v2",
+                state / "bare" / "codex-bare.20260909094306.83358.x" / "memories",
+                state / "bare" / "repos" / "fixture-id" / "variant" / "memories",
+                state / "exec" / "cdxe.20260612100811.61022.x" / "memories",
+                state / "fresh" / "codex-fresh.20260810151848.1.x" / "memories",
+                state / "Volumes_cdrive_repos_fixture" / "main" / "memories",
+                base / ".codex-par" / "run1" / "memories",
+                base / ".codex-state-par" / "run1" / "memories",
             )
             for native_root in native_roots:
                 with self.subTest(native_root=native_root):
@@ -421,11 +433,15 @@ class RepositoryIdentityTest(unittest.TestCase):
 
             ordinary_paths = (
                 base / "memories",
+                base / "memories_v2",
                 base / "project" / "memories",
                 base / ".codex" / "project" / "memories",
-                base / ".codex-state" / "repos" / "fixture-id" / "memory",
-                base / ".codex-state" / "repositories" / "fixture" / "memories",
-                base / ".codex-state" / "repos" / "fixture" / "memories-copy",
+                base / ".codex2" / "project" / "memories_v2",
+                base / ".codex-tools" / "memories",
+                state / "memories",
+                state / "repos" / "fixture-id" / "memory",
+                state / "repos" / "fixture" / "memories-copy",
+                state / "a" / "b" / "c" / "d" / "e" / "memories",
             )
             for ordinary_path in ordinary_paths:
                 with self.subTest(ordinary_path=ordinary_path):

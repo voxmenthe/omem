@@ -55,23 +55,30 @@ class HostHookTest(unittest.TestCase):
     # --- Codex golden regression -------------------------------------------
 
     def test_codex_hook_is_silent_inside_native_memory_directories(self) -> None:
-        internal = make_repo(self.base / ".codex" / "memories")
+        internals = (
+            make_repo(self.base / ".codex" / "memories"),
+            make_repo(self.base / ".codex2" / "memories_v2"),
+            make_repo(
+                self.base / ".codex-state" / "bare" / "codex-bare.1.x" / "memories"
+            ),
+        )
         events = (
             {"hook_event_name": "UserPromptSubmit", "prompt": "work"},
             {"hook_event_name": "SessionStart", "source": "compact"},
         )
-        for event in events:
-            with self.subTest(event=event):
-                result = run_memory(
-                    self.root,
-                    "codex-hook",
-                    cwd=internal,
-                    stdin=json.dumps(event),
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout, "")
-                self.assertEqual(result.stderr, "")
-                self.assertFalse(self.root.exists())
+        for internal in internals:
+            for event in events:
+                with self.subTest(internal=internal, event=event):
+                    result = run_memory(
+                        self.root,
+                        "codex-hook",
+                        cwd=internal,
+                        stdin=json.dumps(event),
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(result.stderr, "")
+                    self.assertFalse(self.root.exists())
 
     def test_codex_checkpoint_source_budget_and_event_scope(self) -> None:
         instructions = (PROJECT / "INSTRUCTIONS.md").read_text(encoding="utf-8")

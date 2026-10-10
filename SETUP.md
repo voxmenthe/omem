@@ -51,10 +51,13 @@ overwrites the other. Codex native-memory maintenance directories are not task
 repositories for OMem repo scope.
 
 Run `memory init`, `memory wake`, and other repo-scoped commands from the
-intended task repository. Recognized `~/.codex-state/repos/*/memories`,
-`~/.codex-state/bare*/memories`, and `~/.codex/memories` trees retain self scope
-but refuse OMem repo scope and suppress OMem hook output. The command does not
-guess a target repository, move existing notes, or synchronize native memory.
+intended task repository. A `memories` or `memories_v2` tree directly inside a
+Codex home retains self scope but refuses OMem repo scope and suppresses OMem
+hook output. Codex homes are account homes such as `~/.codex` and `~/.codex2`,
+and launcher homes up to four levels below `~/.codex-state*` or `~/.codex-par*`
+roots, such as `~/.codex-state/repos/<id>` or
+`~/.codex-state/bare/codex-bare.<stamp>`. The command does not guess a target
+repository, move existing notes, or synchronize native memory.
 
 ## Choose the storage mode
 

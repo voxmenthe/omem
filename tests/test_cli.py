@@ -633,6 +633,22 @@ class CliTest(unittest.TestCase):
         self.assertIn("Codex native-memory directory", status.stdout)
         self.assertNotIn("repo: path=", status.stdout)
 
+        observed_layouts = (
+            self.base / ".codex-state2" / "repos" / "fixture-id" / "memories_v2",
+            self.base / ".codex-state" / "exec" / "cdxe.1.x" / "memories",
+        )
+        for layout_path in observed_layouts:
+            with self.subTest(layout_path=layout_path):
+                other = make_repo(layout_path)
+                initialized = run_memory(self.root, "init", cwd=other)
+                self.assertEqual(initialized.returncode, 0, initialized.stderr)
+                self.assertIn("Codex native-memory directory", initialized.stdout)
+                refused = run_memory(
+                    self.root, "note", "repo:fact:observed", "misrouted", cwd=other
+                )
+                self.assertEqual(refused.returncode, 2)
+                self.assertEqual(list((self.root / "repos").iterdir()), [])
+
     def test_init_refuses_a_symlink_storage_root(self) -> None:
         target = self.base / "unrelated"
         target.mkdir()
