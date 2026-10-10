@@ -32,6 +32,12 @@ OMem is alpha software. Read the [storage and failure
 boundaries](#storage-and-failure-boundaries) before trusting it with important
 work.
 
+The same install also provides [`hist`](hist/README.md), a separate command
+that indexes every Codex and Claude Code session on the machine into one
+searchable, verbatim record. OMem keeps curated memories; `hist` keeps what was
+actually said and done, and never changes OMem. [hist/USAGE.md](hist/USAGE.md)
+describes ways to use it.
+
 ## Quickstart
 
 ### 1. Install the command

@@ -18,6 +18,21 @@ hist sync --all && hist view
 Every read command syncs first, within one second, so `hist sync` is needed only
 for the first full index. `hist` with no arguments lists the commands.
 
+## Ways to use
+
+[USAGE.md](USAGE.md) covers each of these with examples:
+
+- Let the view orient sessions in the repositories listed in `view.inject`.
+- Continue in one tool or account what another did in the same repository.
+- Ask for an earlier decision or exact detail instead of re-deriving it.
+- Search everything: `hist find "<error text>" --all`.
+- Pass a worker references such as `myrepo:12345` instead of pasted context.
+- Read a worker's transcript, not just its report: `hist sessions --workers`,
+  then `hist read <alias>`.
+- Replay any session in order with `hist read`.
+- Widen `view.inject` as the view proves useful, and summarize only small
+  timelines.
+
 ## Configure
 
 `~/.hist/config.toml` (or `$HIST_HOME/config.toml`) is the only source of
@@ -92,7 +107,10 @@ adds the view at session start, compaction, and clear in repositories listed in
 
 A Claude Code worker started from a Claude Code shell cannot see its parent's
 session id; a launcher can export `HIST_PARENT=claude:<parent session id>`
-before starting it. Other worker links are recorded automatically.
+before starting it. Other worker links are recorded automatically. An inherited
+`HIST_PARENT` is ignored when the shell's own session variable names a
+different session of the same host, so that worker's own workers link to it
+rather than to its parent.
 
 Check a hook by hand from a repository in `view.inject`:
 
