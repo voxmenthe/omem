@@ -1,0 +1,268 @@
+"""Transcript fixtures in the record shapes observed on this machine in M0.
+
+Codex records model CLI 0.162 (paginated session_meta, content_item_kinds)
+and the pre-0.2 legacy layout; Claude Code records model 2.1.295. Text is
+synthetic; structure, field names, and injected-context markers are real.
+"""
+
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def stamp(minute: int, second: int = 0) -> str:
+    return f"2026-10-01T10:{minute:02d}:{second:02d}.000Z"
+
+
+def write_jsonl(path: Path, records: list[dict[str, Any]]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record) + "\n")
+    return path
+
+
+class Codex:
+    """Codex rollout records."""
+
+    @staticmethod
+    def path(home: Path, thread: str, archived: bool = False) -> Path:
+        name = f"rollout-2026-10-01T10-00-00-{thread}.jsonl"
+        if archived:
+            return home / "archived_sessions" / name
+        return home / "sessions" / "2026" / "10" / "01" / name
+
+    @staticmethod
+    def meta(thread: str, cwd: str, source: Any = "cli", origin: str | None = None,
+             minute: int = 0, **extra: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "id": thread, "session_id": thread, "timestamp": stamp(minute), "cwd": cwd,
+            "originator": "codex_cli_rs", "cli_version": "0.162.0", "source": source,
+            "model_provider": "openai", "base_instructions": {"text": "base"},
+            "history_mode": "paginated",
+        }
+        if origin:
+            payload["git"] = {"repository_url": origin, "branch": "main", "commit_hash": "abc"}
+        payload.update(extra)
+        return {"timestamp": stamp(minute), "type": "session_meta", "payload": payload}
+
+    @staticmethod
+    def item(payload: dict[str, Any], minute: int, second: int = 0) -> dict[str, Any]:
+        return {"timestamp": stamp(minute, second), "type": "response_item", "payload": payload}
+
+    @classmethod
+    def user(cls, text: str, minute: int, second: int = 0) -> dict[str, Any]:
+        return cls.item({
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": text}],
+            "internal_chat_message_metadata_passthrough": {"content_item_kinds": ["user.text"]},
+        }, minute, second)
+
+    @classmethod
+    def injected_user(cls, minute: int) -> dict[str, Any]:
+        return cls.item({
+            "type": "message", "role": "user",
+            "content": [
+                {"type": "input_text", "text": "# AGENTS.md instructions for /x\n\n<INSTRUCTIONS>\nINJECTED-AGENTS\n</INSTRUCTIONS>"},
+                {"type": "input_text", "text": "<environment_context>INJECTED-ENV</environment_context>"},
+            ],
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["agents_md.instructions", "environments.environment_context"]
+            },
+        }, minute)
+
+    @classmethod
+    def legacy_injected_user(cls, minute: int) -> dict[str, Any]:
+        """An older rollout's injected context: tags only, no item kinds."""
+
+        return cls.item({
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "<user_instructions>INJECTED-OLD</user_instructions>"}],
+        }, minute)
+
+    @classmethod
+    def developer(cls, text: str, minute: int) -> dict[str, Any]:
+        return cls.item({
+            "type": "message", "role": "developer",
+            "content": [{"type": "input_text", "text": text}],
+            "internal_chat_message_metadata_passthrough": {"content_item_kinds": ["hooks.additional_context"]},
+        }, minute)
+
+    @classmethod
+    def assistant(cls, text: str, minute: int, second: int = 0) -> dict[str, Any]:
+        return cls.item({
+            "type": "message", "role": "assistant", "phase": "final_answer",
+            "content": [{"type": "output_text", "text": text}],
+        }, minute, second)
+
+    @classmethod
+    def call(cls, name: str, arguments: str, call_id: str, minute: int) -> dict[str, Any]:
+        return cls.item({"type": "function_call", "name": name, "arguments": arguments,
+                         "call_id": call_id}, minute)
+
+    @classmethod
+    def output(cls, call_id: str, text: str, minute: int) -> dict[str, Any]:
+        return cls.item({"type": "function_call_output", "call_id": call_id, "output": text}, minute)
+
+    @classmethod
+    def reasoning(cls, minute: int) -> dict[str, Any]:
+        return cls.item({"type": "reasoning", "summary": [{"type": "summary_text", "text": "REASONING-TEXT"}],
+                         "encrypted_content": "zzz"}, minute)
+
+    @classmethod
+    def agent_message(cls, author: str, text: str, minute: int) -> dict[str, Any]:
+        return cls.item({"type": "agent_message", "author": author, "recipient": "/root",
+                         "content": [{"type": "input_text", "text": text}]}, minute)
+
+    @staticmethod
+    def compacted(minute: int) -> dict[str, Any]:
+        return {"timestamp": stamp(minute), "type": "compacted",
+                "payload": {"message": "SUMMARY-TEXT", "replacement_history": []}}
+
+    @staticmethod
+    def event(kind: str, minute: int, **fields: Any) -> dict[str, Any]:
+        return {"timestamp": stamp(minute), "type": "event_msg", "payload": {"type": kind, **fields}}
+
+
+class Claude:
+    """Claude Code transcript records."""
+
+    @staticmethod
+    def project(root: Path, cwd: str) -> Path:
+        return root / "".join(c if c.isalnum() else "-" for c in cwd)
+
+    @staticmethod
+    def base(kind: str, uuid: str, session: str, cwd: str, minute: int, entrypoint: str = "cli",
+             parent: str | None = None, **extra: Any) -> dict[str, Any]:
+        record = {
+            "parentUuid": parent, "isSidechain": False, "type": kind, "uuid": uuid,
+            "timestamp": stamp(minute), "userType": "external", "entrypoint": entrypoint,
+            "cwd": cwd, "sessionId": session, "version": "2.1.295", "gitBranch": "main",
+        }
+        record.update(extra)
+        return record
+
+    @classmethod
+    def user(cls, uuid: str, session: str, cwd: str, text: Any, minute: int, **extra: Any) -> dict[str, Any]:
+        return cls.base("user", uuid, session, cwd, minute,
+                        message={"role": "user", "content": text}, **extra)
+
+    @classmethod
+    def assistant(cls, uuid: str, session: str, cwd: str, blocks: list[dict[str, Any]], minute: int,
+                  **extra: Any) -> dict[str, Any]:
+        return cls.base("assistant", uuid, session, cwd, minute, message={
+            "model": "claude-opus-5-5", "id": f"msg_{uuid}", "type": "message", "role": "assistant",
+            "content": blocks, "stop_reason": "end_turn", "usage": {},
+        }, **extra)
+
+    @staticmethod
+    def text(text: str) -> dict[str, Any]:
+        return {"type": "text", "text": text}
+
+    @staticmethod
+    def tool_use(tool_id: str, name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return {"type": "tool_use", "id": tool_id, "name": name, "input": payload}
+
+    @staticmethod
+    def tool_result(tool_id: str, text: str) -> dict[str, Any]:
+        return {"type": "tool_result", "tool_use_id": tool_id, "content": text}
+
+    @classmethod
+    def hook_context(cls, uuid: str, session: str, cwd: str, minute: int, text: str) -> dict[str, Any]:
+        return cls.base("attachment", uuid, session, cwd, minute, attachment={
+            "type": "hook_additional_context", "content": [text], "hookEvent": "SessionStart",
+            "hookName": "SessionStart", "toolUseID": "x",
+        }, rendered=[{"content": text}], renderedRole="system")
+
+    @staticmethod
+    def metadata(kind: str, session: str, **fields: Any) -> dict[str, Any]:
+        return {"type": kind, "sessionId": session, **fields}
+
+
+def git_repo(path: Path, origin: str | None) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    if origin:
+        subprocess.run(["git", "-C", str(path), "remote", "add", "origin", origin], check=True)
+    return path
+
+
+class HistCase(unittest.TestCase):
+    """A scratch machine: two Codex accounts, one Claude Code root, a hist home."""
+
+    maxDiff = None
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name).resolve()
+        self.codex = self.base / ".codex"
+        self.codex_state = self.base / ".codex-state"
+        self.codex2 = self.base / ".codex2"
+        self.claude = self.base / ".claude" / "projects"
+        for path in (self.codex, self.codex_state, self.codex2, self.claude):
+            path.mkdir(parents=True)
+        self.home = self.base / "hist-home"
+        self.repo = git_repo(self.base / "work" / "proj", "git@github.com:me/proj.git")
+        self.origin = "https://github.com/me/proj.git"
+        self.write_config()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def write_config(self, extra: str = "", inject: str = '["proj"]') -> None:
+        self.home.mkdir(exist_ok=True)
+        (self.home / "config.toml").write_text(
+            f"""
+[[sources]]
+adapter = "codex"
+label = "codex"
+roots = ["{self.codex}", "{self.codex_state}"]
+
+[[sources]]
+adapter = "codex"
+label = "codex2"
+roots = ["{self.codex2}"]
+
+[[sources]]
+adapter = "claude"
+label = "claude"
+roots = ["{self.claude}"]
+
+[view]
+inject = {inject}
+{extra}
+"""
+        )
+
+    def hist(self, *args: str, cwd: Path | None = None, stdin: str | None = None,
+             env: dict[str, str] | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
+        environment = {
+            key: value for key, value in os.environ.items()
+            if not key.startswith(("CODEX_", "CLAUDE_CODE_", "HIST_"))
+        }
+        environment.update({"HIST_HOME": str(self.home), "PYTHONPATH": str(REPO_ROOT)})
+        environment.update(env or {})
+        result = subprocess.run(
+            [sys.executable, "-m", "hist", *args], cwd=cwd or self.repo, input=stdin,
+            capture_output=True, text=True, env=environment, timeout=120,
+        )
+        if check and result.returncode != 0:
+            self.fail(f"hist {' '.join(args)} exited {result.returncode}: {result.stderr}")
+        return result
+
+    def db(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.home / "hist.db")
+        self.addCleanup(connection.close)
+        return connection
+
+    def assertNotStored(self, marker: bytes) -> None:
+        stored = b"".join(path.read_bytes() for path in self.home.glob("hist.db*") if path.is_file())
+        self.assertFalse(marker in stored, f"{marker!r} is in the store")

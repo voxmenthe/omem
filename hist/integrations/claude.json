@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "hist hook claude SessionStart",
+            "timeout": 5,
+            "statusMessage": "Loading session history"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "hist hook claude SubagentStart",
+            "timeout": 5,
+            "statusMessage": "Loading session history"
+          }
+        ]
+      }
+    ]
+  }
+}

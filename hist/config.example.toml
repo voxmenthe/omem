@@ -1,0 +1,33 @@
+# hist configuration: copy to ~/.hist/config.toml and edit the roots.
+# Transcript locations come only from this file. Roots may not overlap.
+
+[[sources]]                        # one entry per host installation or account
+adapter = "codex"
+label = "codex"                    # shown in message headers and `hist status`
+roots = ["~/.codex", "~/.codex-state", "~/.codex-par", "~/.codex-state-par"]
+
+[[sources]]
+adapter = "codex"
+label = "codex2"                   # a second Codex account
+roots = ["~/.codex2", "~/.codex-state2"]
+
+[[sources]]
+adapter = "claude"
+label = "claude"
+roots = ["~/.claude/projects"]
+
+[discovery]
+# Scanned only to report session stores that no source claims.
+watch = ["~/.codex*", "~/.claude*", "~/.kimi*", "~/.local/share/opencode", "~/.gemini/antigravity"]
+exclude = []                       # paths or repositories never indexed
+
+[view]
+bytes = 8000
+worker = "header"                  # what a worker gets at start: header, view, or none
+inject = []                        # repositories (timeline names) shown the view; or "all"
+
+[summaries]
+# command = ["hist", "summarize", "devin"]  # or any hist-summarize/1 command; absent: outlines only
+timelines = []                     # timelines opted in to model-written summaries
+max_concurrency = 4
+max_attempts_per_day = 2000

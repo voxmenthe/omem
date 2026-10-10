@@ -29,9 +29,11 @@ Issues = "https://github.com/voxmenthe/omem/issues"
 
 [project.scripts]
 memory = "omem.cli:main"
+hist = "hist.cli:main"
 
 [tool.setuptools]
-packages = ["omem"]
+packages = ["omem", "hist", "hist.adapters"]
 
 [tool.setuptools.package-data]
 omem = ["INSTRUCTIONS.md", "SESSION_REVIEW.md"]
+hist = ["config.example.toml", "integrations/*"]

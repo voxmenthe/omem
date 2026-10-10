@@ -1,0 +1,22 @@
+# hist Codex integration. Merge into the effective user config.toml (see
+# `codex doctor --json`); never replace unrelated settings, then review the
+# definitions through /hooks.
+
+[[hooks.SessionStart]]
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "hist hook codex SessionStart"
+timeout = 5
+statusMessage = "Loading session history"
+# Codex counts approximate tokens; hist caps the view at view.bytes (8,000 bytes by default).
+additionalContextLimit = 8000
+
+[[hooks.SubagentStart]]
+
+[[hooks.SubagentStart.hooks]]
+type = "command"
+command = "hist hook codex SubagentStart"
+timeout = 5
+statusMessage = "Loading session history"
+additionalContextLimit = 8000
