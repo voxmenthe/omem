@@ -32,6 +32,8 @@ For an end-to-end installation:
    in the root config.
 4. [Install the optional hooks](#install-the-optional-hooks) for the hosts
    you use: Codex, Claude Code (which also covers Devin), and Kimi Code.
+   `uv run scripts/install_hooks.py memory --apply` merges the Codex and
+   Claude Code definitions.
 5. Start a fresh session in the target repository. Confirm the agent runs
    `memory init` and `memory wake`, and that the host shows exactly one
    enabled OMem handler for each configured event (in Codex, use `/hooks`).
@@ -317,6 +319,14 @@ fragment into the effective user `config.toml`; do not replace the existing
 file or blindly append a second copy. Keep the tracked fragment as the source
 of truth for the two OMem definitions.
 
+`uv run scripts/install_hooks.py memory` performs that merge for the Codex home
+in `CODEX_HOME` (default `~/.codex`) and the [Claude Code](#claude-code) merge
+below. It only reports until given `--apply`, then keeps a copy of each file it
+changes. It skips a handler whose command is already present, and it leaves a
+file untouched, naming the fragment to merge by hand, when appending would not
+reproduce the existing settings exactly, such as a `hooks` table written
+inline. Run it once per effective user layer, setting `CODEX_HOME` for each.
+
 Do not add the same handler to multiple configuration layers or to both
 `hooks.json` and `config.toml`. Do not reactivate a retired or renamed hook file
 such as `~/.codex/hooks.json.disabled-by-managed-router`. Review and trust the
@@ -350,7 +360,8 @@ primary-agent control.
 and for `SessionStart` with the `compact` matcher. It shares the hook builder,
 deadline, byte ceiling, and fail-open behavior described above. Merge its
 `env` and `hooks` entries into `~/.claude/settings.json` (or a project
-`.claude/settings.json`) without replacing existing entries, and put the
+`.claude/settings.json`) without replacing existing entries, or let
+`scripts/install_hooks.py` merge them into the user file, and put the
 instruction block in the `CLAUDE.md` that Claude Code reads. Verify the
 adapter outside Claude Code:
 

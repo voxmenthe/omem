@@ -1,15 +1,16 @@
 # hist configuration: copy to ~/.hist/config.toml and edit the roots.
-# Transcript locations come only from this file. Roots may not overlap.
+# Transcript locations come only from this file. Roots may not overlap, and
+# roots that do not exist are skipped.
 
 [[sources]]                        # one entry per host installation or account
 adapter = "codex"
 label = "codex"                    # shown in message headers and `hist status`
-roots = ["~/.codex", "~/.codex-state", "~/.codex-par", "~/.codex-state-par"]
+roots = ["~/.codex"]               # add any other CODEX_HOME of the same account
 
-[[sources]]
-adapter = "codex"
-label = "codex2"                   # a second Codex account
-roots = ["~/.codex2", "~/.codex-state2"]
+# [[sources]]                      # a second Codex account in its own CODEX_HOME
+# adapter = "codex"
+# label = "codex2"
+# roots = ["~/.codex2"]
 
 [[sources]]
 adapter = "claude"

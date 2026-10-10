@@ -4,15 +4,14 @@
 SQLite store and lets agents navigate it with short, bounded commands. Sessions
 in one repository share a timeline across hosts and accounts; workers and
 subagents get their own linked timelines. It is read-only history: agents never
-write it, and it never changes OMem. The design is
-[`PLANS/20261008-session-history-plan.md`](../PLANS/20261008-session-history-plan.md).
+write it, and it never changes OMem.
 
 ## Run it
 
 ```bash
-uv tool install --force --editable .        # from this checkout; installs `hist` beside `memory`
-mkdir -p ~/.hist && cp hist/config.example.toml ~/.hist/config.toml   # then edit the roots
-hist sync --all && hist view
+uv tool install .                           # from this checkout; installs `hist` beside `memory`
+mkdir -p ~/.hist && cp hist/config.example.toml ~/.hist/config.toml   # default locations
+hist sync --all && hist timelines
 ```
 
 Every read command syncs first, within one second, so `hist sync` is needed only
@@ -91,26 +90,51 @@ Measured on one 25-message timeline (38 summaries per model):
   minute (45 rate-limit stops in an hour). It sometimes pulled facts from the
   context into the line, and it reports no token usage.
 
+## Tell your agents
+
+Agents learn about `hist` from the history view in `view.inject` repositories,
+and everywhere else only from their instructions. `hist instructions` prints a
+short block for that; add it to your global instruction files,
+`~/.codex/AGENTS.md` for Codex and `~/.claude/CLAUDE.md` for Claude Code, and
+replace it after upgrading.
+
 ## Install the hooks (optional)
 
 Without hooks, every command still works and capture is complete. The hook
 adds the view at session start, compaction, and clear in repositories listed in
 `view.inject`, and records the parent of shell-launched workers.
 
+From the checkout, `uv run scripts/install_hooks.py hist` reports what it would
+add to Claude Code's settings (in `CLAUDE_CONFIG_DIR`, default `~/.claude`) and
+Codex's (in `CODEX_HOME`, default `~/.codex`); `--apply` writes it, keeping a
+copy of each changed file. Run it once per Codex home. To merge by hand:
+
 - Codex: merge [`integrations/codex.toml`](integrations/codex.toml) into the
-  effective user `config.toml` (`codex doctor --json` shows which), then review
-  and trust both definitions through `/hooks`. Until then, Codex reports "Hooks
-  need review" at startup in each Codex home, and the hooks do not run.
+  effective user `config.toml` (`codex doctor --json` shows which).
 - Claude Code: merge the `hooks` entries of
   [`integrations/claude.json`](integrations/claude.json) into
   `~/.claude/settings.json` without replacing existing entries.
 
-A Claude Code worker started from a Claude Code shell cannot see its parent's
-session id; a launcher can export `HIST_PARENT=claude:<parent session id>`
-before starting it. Other worker links are recorded automatically. An inherited
-`HIST_PARENT` is ignored when the shell's own session variable names a
-different session of the same host, so that worker's own workers link to it
-rather than to its parent.
+Either way, Codex then reports "Hooks need review" at its next start in each
+Codex home, and the hooks do not run until you trust them there or in `/hooks`.
+
+Codex workers and Claude Code subagents are linked to the session that started
+them automatically. A Claude Code worker started from a Claude Code shell
+cannot see its parent's session id, so the launcher you start it with must name
+it. In a shell function that starts such a worker:
+
+```bash
+if [[ -n "${CLAUDE_CODE_SESSION_ID:-}" && -z "${CODEX_THREAD_ID:-}" ]]; then
+  export HIST_PARENT="claude:${CLAUDE_CODE_SESSION_ID}"   # started from Claude Code
+else
+  unset HIST_PARENT
+fi
+```
+
+Give the function a subshell body, `name() ( … )`, so the variable does not
+outlive the launch. An inherited `HIST_PARENT` is ignored when
+the shell's own session variable names a different session of the same host,
+so that worker's own workers link to it rather than to its parent.
 
 Check a hook by hand from a repository in `view.inject`:
 

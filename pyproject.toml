@@ -36,4 +36,4 @@ packages = ["omem", "hist", "hist.adapters"]
 
 [tool.setuptools.package-data]
 omem = ["INSTRUCTIONS.md", "SESSION_REVIEW.md"]
-hist = ["config.example.toml", "integrations/*"]
+hist = ["INSTRUCTIONS.md", "config.example.toml", "integrations/*"]

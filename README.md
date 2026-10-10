@@ -40,10 +40,91 @@ describes ways to use it.
 
 ## Quickstart
 
+You need macOS or Linux, Python 3.12 or newer, Git, and
+[uv](https://docs.astral.sh/uv/). One install provides both commands:
+
+```sh
+git clone https://github.com/voxmenthe/omem.git
+cd omem
+uv tool install .
+command -v memory hist
+```
+
+If that prints fewer than two paths, run `uv tool update-shell` and restart the
+shell.
+
+**Index your session history.** Still in the `omem` checkout, index every Codex
+and Claude Code session already on this machine:
+
+```sh
+mkdir -p ~/.hist
+cp hist/config.example.toml ~/.hist/config.toml
+hist sync --all
+```
+
+The example configuration covers the default Codex (`~/.codex`) and Claude Code
+(`~/.claude/projects`) locations and skips roots that do not exist. This first
+sync reads every transcript once, which can take a while: here, 35 GB took 30
+minutes and made an 11.2 GB store. Continue in another terminal meanwhile.
+Afterwards, every read command catches up on its own within a second.
+
+**Give a repository memory.** In each repository you want remembered:
+
+```sh
+cd /path/to/your/repository
+memory init
+memory wake
+```
+
+Then paste the output of `memory instructions` into the instruction file your
+agent reads there: `AGENTS.md`, or `CLAUDE.md` for Claude Code. Agents then read
+memory at the start of each session and record candidate observations as they
+work; consolidation turns those into memory.
+[Step 3](#3-give-your-coding-agent-the-memory-workflow) below has a ready-made
+policy to wrap around the block.
+
+**Try session history.** Once the sync finishes:
+
+```sh
+hist timelines                        # one per repository, most recent first
+hist view                             # this repository's history, if any
+hist find "<distinctive text>" --all  # search every session
+hist zoom <ref>                       # open a reference view or find printed
+```
+
+**Connect your agents.** Agents use neither tool until you tell them about it.
+Nothing here is preconfigured; set up these three pieces yourself:
+
+1. *Instructions.* Add the output of `hist instructions` to your global
+   instruction files, `~/.codex/AGENTS.md` for Codex and `~/.claude/CLAUDE.md`
+   for Claude Code, so agents in every repository know when to search history.
+   The `memory instructions` block goes in each repository, as above.
+2. *Hooks.* From the `omem` checkout, preview and then merge both tools' hooks
+   into Claude Code's and Codex's settings:
+
+   ```sh
+   uv run scripts/install_hooks.py            # report what it would add
+   uv run scripts/install_hooks.py --apply    # write; keeps each old file
+   ```
+
+   Handlers already present are left alone, and a file it cannot merge exactly
+   is left untouched with the fragment to merge by hand. Pass `memory` or
+   `hist` to install one tool's hooks only. For more than one Codex home, run
+   it once per home with `CODEX_HOME` set. At its next start Codex says "Hooks
+   need review": trust them there or in `/hooks`.
+3. *Where the history view appears.* List repositories in `view.inject` in
+   `~/.hist/config.toml`. Sessions there start with the repository's history,
+   so agents use it without being asked.
+
+[hist/USAGE.md](hist/USAGE.md) shows ways to use session history.
+
+## Detailed setup
+
 ### 1. Install the command
 
 Use macOS or Linux with Python 3.12 or newer, Git, and
-[uv](https://docs.astral.sh/uv/). Install OMem from a fresh clone:
+[uv](https://docs.astral.sh/uv/). Install OMem from a fresh clone; this also
+installs `hist`:
 
 ```sh
 git clone https://github.com/voxmenthe/omem.git
@@ -128,6 +209,11 @@ The prompt hook can bring useful memories into Codex before it answers. The
 compaction hook restores the memory instructions after Codex shrinks its
 context.
 
+`uv run scripts/install_hooks.py memory --apply` merges the Codex and Claude
+Code definitions below into the Codex home in `CODEX_HOME` (default `~/.codex`)
+and Claude Code's settings; run it without `--apply` first to see the changes,
+then continue at step 3. To merge by hand:
+
 1. Run `codex doctor --json` from the Codex launcher you normally use. Find the
    `config.toml` that Codex loaded.
 2. Merge [`integrations/codex/hooks.toml`](integrations/codex/hooks.toml) into
@@ -166,6 +252,17 @@ Claude Code, Devin, and Kimi Code have their own routes:
 
 See [Claude Code, Devin, and Kimi Code](#claude-code-devin-and-kimi-code) for
 what each route does and what has been validated.
+
+### 5. Index session history with `hist`
+
+`hist` needs no per-repository setup: the Quickstart's three commands index
+everything, and its last step connects your agents. Edit `roots` in
+`~/.hist/config.toml` when Codex or Claude Code keeps sessions outside the
+default locations, for example a second `CODEX_HOME` for another account;
+`hist status` reports session stores that no source covers.
+[`hist/README.md`](hist/README.md) documents every configuration key, the hooks,
+linking workers to the sessions that started them, optional summaries, and
+maintenance. `hist` only reads transcripts and never changes OMem's stores.
 
 ## Commands
 
