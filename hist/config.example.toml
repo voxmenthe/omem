@@ -28,7 +28,9 @@ worker = "header"                  # what a worker gets at start: header, view, 
 inject = []                        # repositories (timeline names) shown the view; or "all"
 
 [summaries]
-# command = ["hist", "summarize", "devin"]  # or any hist-summarize/1 command; absent: outlines only
+# Without a command, views use outlines. Backends: claude, codex, devin,
+# opencode, anthropic, openai, or any hist-summarize/1 command (hist/README.md).
+# command = ["hist", "summarize", "claude"]
 timelines = []                     # timelines opted in to model-written summaries
 max_concurrency = 4
 max_attempts_per_day = 2000

@@ -58,23 +58,88 @@ transcript on the machine (32,483 sources, 35 GB, 2.75 million messages) took
 ## Summaries (optional)
 
 `hist build` writes summaries for the timelines in `summaries.timelines`
-through `summaries.command`. `hist summarize` is a ready-made command over a
-free agent CLI:
+through `summaries.command`. `hist summarize BACKEND` is a ready-made command
+over the agent CLI you already use, or a model API. Each backend has a default
+model; `--model` picks another.
+
+| Backend | Calls | Default model | Needs |
+|---|---|---|---|
+| `claude` | Claude Code, `claude -p` | `claude-haiku-5-5` | Claude Code, logged in |
+| `codex` | Codex, `codex exec` | `gpt-6-luna`, medium effort | Codex, logged in |
+| `devin` | Devin, `devin -p` | `swe-2-max` | Devin, logged in |
+| `opencode` | OpenCode, `opencode run` | `opencode/muse-spark-1.3-contributor-free` | OpenCode |
+| `anthropic` | the Anthropic Messages API | `claude-haiku-5-5` | `ANTHROPIC_API_KEY` |
+| `openai` | the OpenAI Chat Completions API, or any compatible one | `gpt-6-luna`, medium effort | `OPENAI_API_KEY` |
+
+`codex` and `openai` also take `--effort`, the reasoning effort the model
+accepts, such as `low`, `medium` or `high`. Without it, the default model runs
+at medium and a model named with `--model` at its own default, so no effort
+setting reaches a model that may not accept one.
 
 ```toml
 [summaries]
-command = ["hist", "summarize", "devin"]      # SWE-2 Max; add "--model", "swe-2-high" for another
-# command = ["hist", "summarize", "opencode"] # Muse Spark 1.3 free; "--model", "opencode/<id>"
+command = ["hist", "summarize", "claude"]
+# command = ["hist", "summarize", "codex", "--effort", "low"]
+# command = ["hist", "summarize", "anthropic"]
+# command = ["hist", "summarize", "openai", "--model", "gpt-6-luna", "--effort", "medium"]
+# command = ["hist", "summarize", "openai", "--base-url", "https://openrouter.ai/api/v1",
+#            "--key-env", "OPENROUTER_API_KEY", "--model", "anthropic/claude-haiku-5.5"]
+# command = ["hist", "summarize", "openai", "--base-url", "http://localhost:11434/v1",
+#            "--model", "<local model>"]
 timelines = ["omem"]
 ```
 
-Each call runs the CLI headless in an empty scratch directory, without your
-rules, hooks or plugins, and fails unless the agent made exactly one model
-request and called no tool. Devin's tools are disabled or denied, and the
-run's Devin session is deleted afterwards. OpenCode runs a private server
-(`--standalone`) on a scratch config. Zen's free tier refuses requests that
-list no OpenCode tools, so the tools stay listed with every call needing an
-approval that a headless run cannot give.
+An API backend sends one request that offers no tools. `--base-url` points it
+at another service: the root for `anthropic`, the URL ending in `/v1` for
+`openai`, so OpenRouter or a local server works through `openai`. Keys stay in
+the environment, never in the configuration. A default key goes only to its
+own service: with `--base-url`, `--key-env` names the variable holding that
+service's key, and without it no key is sent, as a local server needs.
+
+Each CLI call runs headless in an empty scratch directory with no tools and
+none of your settings, hooks, plugins or MCP servers, leaves no session behind,
+and fails unless the agent made exactly one model request and called no tool.
+Whatever the CLI always sends still costs tokens. For one message, Claude Code
+sent about 1,300 input tokens and Codex about 8,800 with `gpt-6-luna`. About
+3,000 of the Codex tokens were an 11 KB global `~/.codex/AGENTS.md`: Codex
+sends that file whole and has no setting to leave it out. Devin adds about
+6,500 tokens of its own prompt. The same message over an API cost about 500 to
+750.
+
+- Claude Code loads no setting source, and `hist`'s system prompt replaces
+  its own, so neither `CLAUDE.md` nor hooks are loaded. The run is not saved.
+- Codex ignores your `config.toml` and rules and runs with every tool feature
+  off, a read-only sandbox, and `--ephemeral`. A renamed setting or feature
+  stops the call rather than being skipped.
+- Devin's tools are disabled or denied, and the run's Devin session is deleted
+  afterwards.
+- OpenCode runs a private server (`--standalone`) on a scratch config. Zen's
+  free tier refuses requests that list no OpenCode tools, so the tools stay
+  listed with every call needing an approval that a headless run cannot give.
+
+`claude-haiku-5-5` is the full model id on purpose: Claude Code lets
+`ANTHROPIC_DEFAULT_HAIKU_MODEL` remap the `haiku` alias to another model.
+
+### Your own summarizer
+
+Any command works as `summaries.command` if it reads one JSON request on
+stdin and writes one JSON answer on stdout:
+
+```json
+{"protocol": "hist-summarize/1", "deadline": "2026-10-10T18:15:00Z",
+ "system": "<instructions>", "context": "<nearby lines, or empty>",
+ "turns": [{"role": "user", "text": "<the task>"}]}
+```
+
+```json
+{"text": "<one line>", "usage": {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}}
+```
+
+`turns` alternate between `user` and `assistant`, starting and ending with
+`user`. A retry adds the line that was too long and a request to shorten it.
+`usage` may be `null`. On failure, exit nonzero with the reason on stderr. A
+call has until `deadline`, 900 seconds; after that, the builder ends the
+command's whole process group.
 
 Measured on one 25-message timeline (38 summaries per model):
 

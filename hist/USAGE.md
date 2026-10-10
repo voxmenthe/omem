@@ -112,9 +112,15 @@ source claims and sources that have stopped.
 ### Summarize a small, high-value timeline
 
 Summaries replace outline lines with real one-line summaries, but each costs a
-model call: about 1.5 per message, and 1 to 2 minutes each with SWE-2 Max.
-Opt in only small timelines through `summaries.timelines`; one with hundreds of
-thousands of messages is out of reach. Everything works without summaries.
+model call: about 1.5 per message. A call takes seconds with Claude Haiku or
+GPT-6 Luna and 1 to 2 minutes with SWE-2 Max. Opt in only small timelines
+through `summaries.timelines`; one with hundreds of thousands of messages is
+out of reach. Everything works without summaries.
+
+`summaries.command` can use the agent CLI you already have (Claude Code, Codex,
+Devin, OpenCode) or a model API, including any OpenAI-compatible service or a
+local server: [README.md](README.md#summaries-optional) lists the backends and
+the contract for writing your own.
 
 ## Limits
 

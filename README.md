@@ -116,7 +116,13 @@ Nothing here is preconfigured; set up these three pieces yourself:
    `~/.hist/config.toml`. Sessions there start with the repository's history,
    so agents use it without being asked.
 
-[hist/USAGE.md](hist/USAGE.md) shows ways to use session history.
+All three attach to the agent CLI, not the model: Codex running GPT-6 Luna or
+Claude Code running Haiku uses them the same way.
+
+[hist/USAGE.md](hist/USAGE.md) shows ways to use session history. Summaries are
+optional: `hist` can have the agent CLI you already use, or a model API, write
+one-line summaries for the timelines you choose. See [the
+backends](hist/README.md#summaries-optional).
 
 ## Detailed setup
 

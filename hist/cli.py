@@ -31,7 +31,10 @@ USAGE = """hist: every agent session on this machine, indexed and navigable by r
   hist sync [--all]                       index new records (reads do this automatically)
   hist verify [SESSION]                   re-hash indexed transcripts to catch in-place rewrites
   hist build [--limit N]                  summaries for opted-in timelines
-  hist summarize BACKEND [--model M]      a [summaries] command over devin or opencode
+  hist summarize BACKEND [--model M]      a [summaries] command over an agent CLI or API:
+                                          claude, codex, devin, opencode; anthropic, openai
+                                          (APIs also take --base-url URL --key-env VAR;
+                                          codex and openai take --effort E, default medium)
   hist hook HOST EVENT                    SessionStart or SubagentStart hook
   hist instructions                       agent instruction block for your instruction files
   hist backup PATH                        consistent copy of the store
@@ -72,8 +75,11 @@ def _parser() -> argparse.ArgumentParser:
     build_parser = sub.add_parser("build")
     build_parser.add_argument("--limit", type=int)
     summarize = sub.add_parser("summarize")
-    summarize.add_argument("backend", choices=sorted(BACKENDS))
+    summarize.add_argument("backend", choices=BACKENDS)
     summarize.add_argument("--model")
+    summarize.add_argument("--base-url")
+    summarize.add_argument("--key-env")
+    summarize.add_argument("--effort")
     hook = sub.add_parser("hook")
     hook.add_argument("host")
     hook.add_argument("event")
@@ -127,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "hook":
         return hook_main(args.host, args.event, home)
     if args.command == "summarize":
-        return summarize_main(args.backend, args.model)
+        return summarize_main(args.backend, args.model, args.base_url, args.key_env, args.effort)
     if args.command == "instructions":
         sys.stdout.write(resources.files("hist").joinpath("INSTRUCTIONS.md").read_text(encoding="utf-8"))
         return 0
