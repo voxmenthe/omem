@@ -34,7 +34,11 @@ work.
 
 The same install also provides [`hist`](hist/README.md), a separate command
 that indexes every Codex and Claude Code session on the machine into one
-searchable, verbatim record. OMem keeps curated memories; `hist` keeps what was
+searchable, verbatim record. 
+`hist` borrows heavily from Victor Taelin's UniiChat (https://uniichat.com/) 
+for inspiration.
+
+OMem keeps curated memories; `hist` keeps what was
 actually said and done, and never changes OMem. [hist/USAGE.md](hist/USAGE.md)
 describes ways to use it.
 
