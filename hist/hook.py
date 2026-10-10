@@ -35,17 +35,14 @@ def parent_from_environment(
 ) -> tuple[str, str, str] | None:
     """(adapter or '*', session id, via) for a shell-launched worker's parent.
 
-    `HIST_PARENT` wins. Otherwise a single inherited session variable names
-    the parent; a host's variable inside its own hooks names the hook's own
-    session and is ignored. Conflicting candidates record nothing.
+    `HIST_PARENT` wins unless an inherited variable of the same host names a
+    different session: a launcher set it in a parent's shell, and an
+    intermediate session's worker inherited it stale. Otherwise a single
+    inherited session variable names the parent; a host's variable inside its
+    own hooks names the hook's own session and is ignored. Conflicting
+    candidates record nothing.
     """
 
-    explicit = environment.get("HIST_PARENT", "").strip()
-    if explicit:
-        name, _, rest = explicit.partition(":")
-        if rest and name in HOSTS:
-            return name, rest, "HIST_PARENT"
-        return "*", explicit, "HIST_PARENT"
     candidates = {
         (owner, value.strip(), variable)
         for variable, owner in _SESSION_VARIABLES.items()
@@ -53,6 +50,12 @@ def parent_from_environment(
         and not (owner == host == "claude")
         and value != own
     }
+    explicit = environment.get("HIST_PARENT", "").strip()
+    if explicit:
+        name, _, rest = explicit.partition(":")
+        named = (name, rest) if rest and name in HOSTS else ("*", explicit)
+        if not any(owner == named[0] and value != named[1] for owner, value, _ in candidates):
+            return named[0], named[1], "HIST_PARENT"
     if len({(owner, value) for owner, value, _ in candidates}) == 1:
         return next(iter(candidates))
     return None

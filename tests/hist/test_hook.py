@@ -77,6 +77,20 @@ class HookTest(HistCase):
         self.claude_start(NEW, env={"CLAUDE_CODE_SESSION_ID": "some-other-session"})
         self.assertEqual(self.db().execute("SELECT count(*) FROM links").fetchone(), (0,))
 
+    def test_hist_parent_links_its_worker_but_not_that_workers_own_workers(self) -> None:
+        # A launcher in PARENT's shell starts Claude worker NEW with HIST_PARENT;
+        # NEW's shell then starts Codex worker WORKER, which inherits it stale.
+        self.write_config(inject="[]")
+        launched = {"HIST_PARENT": f"claude:{PARENT}"}
+        self.claude_start(NEW, env={**launched, "CLAUDE_CODE_SESSION_ID": NEW})
+        payload = {"session_id": WORKER, "transcript_path": str(Codex.path(self.codex, WORKER)),
+                   "cwd": str(self.repo), "hook_event_name": "SessionStart", "source": "startup"}
+        self.hist("hook", "codex", "SessionStart", stdin=json.dumps(payload),
+                  env={**launched, "CLAUDE_CODE_SESSION_ID": NEW})
+        links = self.db().execute("SELECT child_native, parent_native, via FROM links").fetchall()
+        self.assertEqual(sorted(links), sorted([(NEW, PARENT, "HIST_PARENT"),
+                                                (WORKER, NEW, "CLAUDE_CODE_SESSION_ID")]))
+
     def test_a_transcript_outside_every_source_raises_an_alarm(self) -> None:
         stray = self.base / ".claude-other" / "projects" / "x" / f"{NEW}.jsonl"
         self.claude_start(NEW, transcript=str(stray))
