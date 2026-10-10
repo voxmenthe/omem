@@ -84,7 +84,8 @@ adds the view at session start, compaction, and clear in repositories listed in
 
 - Codex: merge [`integrations/codex.toml`](integrations/codex.toml) into the
   effective user `config.toml` (`codex doctor --json` shows which), then review
-  and trust both definitions through `/hooks`.
+  and trust both definitions through `/hooks`. Until then, Codex reports "Hooks
+  need review" at startup in each Codex home, and the hooks do not run.
 - Claude Code: merge the `hooks` entries of
   [`integrations/claude.json`](integrations/claude.json) into
   `~/.claude/settings.json` without replacing existing entries.
@@ -115,7 +116,9 @@ A source stops, loudly, when its transcript no longer extends what was indexed
 or breaks its adapter's expectations; the rest keep syncing.
 
 Not implemented yet: `purge`, `restore`, `reset`, and background summary
-builds (`hist build` runs synchronously).
+builds (`hist build` runs synchronously). Every command, reads included, needs
+write access to `~/.hist`, so `hist` fails inside a sandbox that blocks it, such
+as Codex's `read-only` or `workspace-write` modes.
 
 ## Develop
 
