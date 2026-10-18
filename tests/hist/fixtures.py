@@ -2,8 +2,9 @@
 
 Codex records model CLI 0.162 (paginated session_meta, content_item_kinds)
 and the pre-0.2 legacy layout; Claude Code records model 2.1.295; Command
-Code records model CLI 1.83 (format version 3). Text is synthetic; structure,
-field names, and injected-context markers are real.
+Code records model CLI 1.83 (format version 3); OpenCode tables model 2.0.31.
+Text is synthetic; structure, field names, and injected-context markers are
+real.
 """
 
 import itertools
@@ -13,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def stamp(minute: int, second: int = 0) -> str:
     return f"2026-10-01T10:{minute:02d}:{second:02d}.000Z"
+
+
+def epoch_ms(minute: int, second: int = 0) -> int:
+    """`stamp(minute, second)` in milliseconds since the epoch."""
+
+    return 1790848800000 + (minute * 60 + second) * 1000
 
 
 def write_jsonl(path: Path, records: list[dict[str, Any]]) -> Path:
@@ -231,6 +239,77 @@ class CommandCode:
                                              "content": [{"type": "text", "text": text}]}], minute)
 
 
+class OpenCode:
+    """An OpenCode database: the `session_v2` and `session_message` columns
+    hist reads, in WAL mode with the connection held open as a running host's is."""
+
+    SCHEMA = """
+        CREATE TABLE session_v2 (
+          id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, version TEXT NOT NULL,
+          time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_viewed INTEGER);
+        CREATE TABLE session_message (
+          id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, seq INTEGER NOT NULL,
+          time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+    """
+
+    def __init__(self, root: Path) -> None:
+        root.mkdir(parents=True, exist_ok=True)
+        self.path = root / "opencode.db"
+        self.db = sqlite3.connect(self.path)
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.executescript(self.SCHEMA)
+        self._ids = itertools.count(1)
+
+    def close(self) -> None:
+        self.db.close()
+
+    def source(self, session: str) -> Path:
+        return Path(f"{self.path}#{session}")
+
+    def session(self, session: str, cwd: str, minute: int = 0, version: str = "2.0.31",
+                viewed: bool = True, parent: str | None = None) -> None:
+        self.db.execute(
+            "INSERT INTO session_v2 VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (session, parent, cwd, version, epoch_ms(minute), epoch_ms(minute),
+             epoch_ms(minute) if viewed else None),
+        )
+        self.db.commit()
+
+    def add(self, session: str, rows: list[dict[str, Any]]) -> None:
+        """Append rows, each `{"type", "minute", "data"}`, after the session's
+        last; they are updated now, as a running host's are."""
+
+        (last,) = self.db.execute(
+            "SELECT coalesce(max(seq), 3) FROM session_message WHERE session_id = ?", (session,)
+        ).fetchone()
+        written = int(time.time() * 1000)
+        for seq, row in enumerate(rows, last + 1):
+            created = epoch_ms(row["minute"])
+            data = {**row["data"], "time": {"created": created}}
+            self.db.execute(
+                "INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (f"msg_{next(self._ids):08d}", session, row["type"], seq, created, written, json.dumps(data)),
+            )
+        self.db.commit()
+
+    @staticmethod
+    def row(kind: str, minute: int, **data: Any) -> dict[str, Any]:
+        return {"type": kind, "minute": minute, "data": data}
+
+    @classmethod
+    def user(cls, text: str, minute: int) -> dict[str, Any]:
+        return cls.row("user", minute, text=text)
+
+    @classmethod
+    def assistant(cls, blocks: list[dict[str, Any]], minute: int, **data: Any) -> dict[str, Any]:
+        return cls.row("assistant", minute, agent="build", model={"id": "m"}, content=blocks,
+                       finish="stop", **data)
+
+    @classmethod
+    def idle(cls, minute: int) -> dict[str, Any]:
+        return cls.row("idle", minute, outcome="succeeded")
+
+
 def git_repo(path: Path, origin: str | None) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q", str(path)], check=True)
@@ -240,8 +319,8 @@ def git_repo(path: Path, origin: str | None) -> Path:
 
 
 class HistCase(unittest.TestCase):
-    """A scratch machine: two Codex accounts, one root each for Claude Code
-    and Command Code, and a hist home."""
+    """A scratch machine: two Codex accounts, one root each for Claude Code,
+    Command Code, and OpenCode, and a hist home."""
 
     maxDiff = None
 
@@ -253,6 +332,7 @@ class HistCase(unittest.TestCase):
         self.codex2 = self.base / ".codex2"
         self.claude = self.base / ".claude" / "projects"
         self.commandcode = self.base / ".commandcode" / "projects"
+        self.opencode = self.base / ".local" / "share" / "opencode"
         for path in (self.codex, self.codex_state, self.codex2, self.claude, self.commandcode):
             path.mkdir(parents=True)
         self.home = self.base / "hist-home"
@@ -286,6 +366,11 @@ roots = ["{self.claude}"]
 adapter = "commandcode"
 label = "commandcode"
 roots = ["{self.commandcode}"]
+
+[[sources]]
+adapter = "opencode"
+label = "opencode"
+roots = ["{self.opencode}"]
 
 [view]
 inject = {inject}

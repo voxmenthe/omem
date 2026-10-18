@@ -41,6 +41,10 @@ class Found:
     path: str
     # Lower ranks win when one logical source has several files.
     rank: tuple[int, ...] = ()
+    # A database source's change token and last activity, which the host's
+    # tables give; a transcript file's come from its lstat.
+    token: str | None = None
+    mtime: float | None = None
 
 
 @dataclass(frozen=True)
@@ -84,7 +88,8 @@ class Listing(Protocol):
 
 
 class Reader(Protocol):
-    """Progress through a source: `hist.reader` for transcript files."""
+    """Progress through a source: `hist.reader` for transcript files,
+    `hist.rows.Reader` for database rows."""
 
     Cursor: Any
 
@@ -124,6 +129,13 @@ def normalize_time(value: object, fallback: str) -> str:
         parsed = parsed.replace(tzinfo=timezone.utc)
     parsed = parsed.astimezone(timezone.utc)
     return parsed.strftime("%Y-%m-%dT%H:%M:%S.") + f"{parsed.microsecond // 1000:03d}Z"
+
+
+def utc_time(milliseconds: int) -> str:
+    """normalize_time's format for a time since the epoch."""
+
+    seconds, millis = divmod(milliseconds, 1000)
+    return datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + f"{millis:03d}Z"
 
 
 def clip_output(text: str) -> str:
@@ -206,11 +218,12 @@ def count_unknown(state: dict[str, Any], what: str) -> None:
 
 
 def adapter(name: str) -> Adapter:
-    from . import claude, codex, commandcode
+    from . import claude, codex, commandcode, opencode
 
     adapters: dict[str, Adapter] = {
         "codex": codex.ADAPTER,
         "claude": claude.ADAPTER,
         "commandcode": commandcode.ADAPTER,
+        "opencode": opencode.ADAPTER,
     }
     return adapters[name]

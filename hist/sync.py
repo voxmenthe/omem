@@ -160,7 +160,12 @@ def _discover(
     for source in config.sources:
         if source.label in blocked:
             continue
-        for found in adapter(source.adapter).discover(source.roots, listing):
+        try:
+            discovered = adapter(source.adapter).discover(source.roots, listing)
+        except Expectation as error:
+            alarms.append(("adapter", source.label, f"discovery failed: {error}"))
+            continue
+        for found in discovered:
             grouped.setdefault((source.adapter, found.native_id), []).append((source, found))
     chosen: dict[tuple[str, str], _Candidate] = {}
     for key, options in grouped.items():
@@ -173,7 +178,7 @@ def _discover(
                  + ", ".join(sorted({o[0].label for o in options})))
             )
         for source, found in options:
-            stat = _token(found.path)
+            stat = _token(found.path) if found.token is None else (found.token, found.mtime, False)
             if stat is None:
                 continue
             if stat[2]:

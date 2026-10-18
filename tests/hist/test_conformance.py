@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from tests.hist.fixtures import (
-    Claude, Codex, CommandCode, HistCase, write_jsonl,
+    Claude, Codex, CommandCode, HistCase, OpenCode, write_jsonl,
 )
 
 BIG = "y" * 4000
@@ -50,6 +50,8 @@ class Conformance(HistCase):
         self.hist("status")
 
     def write(self, number: int, records: list[dict[str, Any]], fresh: bool = True) -> tuple[str, Path]:
+        """(alias, source path) after appending records; a host that keeps a
+        database overrides this."""
         alias, path = self.transcript(number)
         write_jsonl(path, (self.opening(number) if fresh else []) + records)
         return alias, path
@@ -216,6 +218,44 @@ class CommandCodeConformance(Conformance):
         record = CommandCode.user("x", minute)
         del record["message"]["content"]
         return record
+
+
+class OpenCodeConformance(Conformance):
+    label = "opencode"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.host = OpenCode(self.opencode)
+        self.addCleanup(self.host.close)
+
+    def native(self, number: int) -> str:
+        return f"ses_conformance{number:08d}"
+
+    def write(self, number: int, records: list[dict[str, Any]], fresh: bool = True) -> tuple[str, Path]:
+        native = self.native(number)
+        if fresh:
+            self.host.session(native, str(self.repo))
+        # A turn's rows become final when its `idle` row is written.
+        self.host.add(native, records + [OpenCode.idle(records[-1]["minute"])])
+        return native[-8:], self.host.source(native)
+
+    def user(self, number: int, text: str, minute: int) -> dict[str, Any]:
+        return OpenCode.user(text, minute)
+
+    def reply(self, number: int, text: str, minute: int) -> dict[str, Any]:
+        return OpenCode.assistant([{"type": "text", "text": text}], minute)
+
+    def injected(self, number: int, minute: int) -> list[dict[str, Any]]:
+        return [
+            OpenCode.row("synthetic", minute, text="INJECTED instructions from AGENTS.md"),
+            OpenCode.row("system", minute, text="INJECTED date notice", description="d", metadata={}),
+        ]
+
+    def unknown(self, number: int, minute: int) -> dict[str, Any]:
+        return OpenCode.row("future-row", minute, text="UNKNOWN-TEXT")
+
+    def broken(self, number: int, minute: int) -> dict[str, Any]:
+        return OpenCode.row("user", minute, files=[])
 
 
 del Conformance
