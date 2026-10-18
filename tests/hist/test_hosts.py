@@ -2,7 +2,7 @@
 
 import json
 
-from tests.hist.fixtures import CommandCode, HistCase, OpenCode, write_jsonl
+from tests.hist.fixtures import CommandCode, Devin, HistCase, OpenCode, write_jsonl
 
 TYPED = "cc000000-0000-4000-8000-0000000000a1"
 PRINTED = "cc000000-0000-4000-8000-0000000000b2"
@@ -157,3 +157,57 @@ class OpenCodeTest(InstalledCase):
         self.assertIn(f"stopped: opencode:{self.host.source('ses_rewritten00c1').name}", result.stdout)
         self.assertIn("1 unreadable or moved", result.stdout)
         self.assertIn("consumed rows changed", self.hist("status").stdout)
+
+
+class DevinTest(InstalledCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.host = Devin(self.devin)
+        self.addCleanup(self.host.close)
+
+    def test_main_chains_are_indexed_once_and_others_never(self) -> None:
+        host, session = self.host, "devin-session-000000d1"
+        host.session(session, str(self.repo))
+        prompt = host.user("fix the guard", 1, message_id="typed-1")
+        host.add(session, [
+            (0, None, host.prompt(0)),
+            (1, 0, prompt),
+            (2, 1, host.reply("", 2, calls=[{"id": "c1", "name": "read", "arguments": "{'path': 'guard.py'}"}])),
+            (3, 2, host.message("tool", "def guard(): ...", 2, source="tool_result", operation="read",
+                                tool_call_id="c1")),
+            (4, 3, host.message("user", "continue", 3, source="user")),
+            (5, 4, host.reply("guard fixed", 3)),
+            # A later main chain repeats the prompt under its message id.
+            (10, None, host.message("system", "<system_info>\nos: macos", 4)),
+            (11, 10, prompt),
+            (20, None, host.prompt(5, operation="subagent_explore")),
+            (21, 20, host.user("SUBAGENT-TASK", 5)),
+            (22, 21, host.reply("SUBAGENT-REPLY", 5)),
+            (30, None, host.message("system", "You are a Summarizer of this conversation.", 6)),
+            (31, 30, host.reply("SUMMARY-TEXT", 6)),
+            # A chain whose root is stored after its first message, as when Devin rewrites one.
+            (41, 40, host.user("asked under a late root", 7)),
+            (40, None, host.prompt(7)),
+        ])
+        skipped = "devin-session-000000d2"
+        host.session(skipped, str(self.base / "tmp" / "hist-summarize-x1" / "work"))
+        host.add(skipped, [(0, None, host.prompt(0)), (1, 0, host.user("SUMMARIZER-PROMPT", 1))])
+
+        self.hist("sync")
+        db = self.db()
+        self.assertEqual(db.execute("SELECT native_id, class FROM sessions").fetchall(), [(session, "worker")])
+        self.assertEqual(
+            db.execute("SELECT reason FROM sources WHERE native_id = ?", (skipped,)).fetchone(),
+            ("hist summarizer run",))
+        rows = db.execute(
+            "SELECT kind, tool, text FROM messages WHERE record >= 0 ORDER BY position").fetchall()
+        self.assertEqual(rows, [
+            ("user", None, "fix the guard"),
+            ("tool_call", "read", "{'path': 'guard.py'}"),
+            ("tool_result", "read", "def guard(): ..."),
+            ("agent", None, "guard fixed"),
+            ("user", None, "asked under a late root"),
+        ])
+        for marker in (b"SUBAGENT-", b"SUMMARY-TEXT", b"SUMMARIZER-PROMPT", b"THINKING-TEXT"):
+            self.assertNotStored(marker)
+        self.assertNotIn("unknown record types", self.hist("status").stdout)

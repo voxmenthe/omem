@@ -218,12 +218,13 @@ def count_unknown(state: dict[str, Any], what: str) -> None:
 
 
 def adapter(name: str) -> Adapter:
-    from . import claude, codex, commandcode, opencode
+    from . import claude, codex, commandcode, devin, opencode
 
     adapters: dict[str, Adapter] = {
         "codex": codex.ADAPTER,
         "claude": claude.ADAPTER,
         "commandcode": commandcode.ADAPTER,
+        "devin": devin.ADAPTER,
         "opencode": opencode.ADAPTER,
     }
     return adapters[name]

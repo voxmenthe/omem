@@ -2,9 +2,9 @@
 
 Codex records model CLI 0.162 (paginated session_meta, content_item_kinds)
 and the pre-0.2 legacy layout; Claude Code records model 2.1.295; Command
-Code records model CLI 1.83 (format version 3); OpenCode tables model 2.0.31.
-Text is synthetic; structure, field names, and injected-context markers are
-real.
+Code records model CLI 1.83 (format version 3); OpenCode tables model 2.0.31;
+Devin tables model CLI 3000.10. Text is synthetic; structure, field names,
+and injected-context markers are real.
 """
 
 import itertools
@@ -310,6 +310,71 @@ class OpenCode:
         return cls.row("idle", minute, outcome="succeeded")
 
 
+class Devin:
+    """A Devin CLI database: the `sessions` and `message_nodes` columns hist
+    reads, in WAL mode with the connection held open."""
+
+    SCHEMA = """
+        CREATE TABLE sessions (
+          id TEXT PRIMARY KEY, working_directory TEXT NOT NULL, created_at INTEGER NOT NULL,
+          last_activity_at INTEGER NOT NULL);
+        CREATE TABLE message_nodes (
+          row_id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, node_id INTEGER NOT NULL,
+          parent_node_id INTEGER, chat_message TEXT NOT NULL, created_at INTEGER NOT NULL, metadata TEXT,
+          UNIQUE (session_id, node_id));
+    """
+
+    def __init__(self, root: Path) -> None:
+        root.mkdir(parents=True, exist_ok=True)
+        self.path = root / "sessions.db"
+        self.db = sqlite3.connect(self.path)
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.executescript(self.SCHEMA)
+        self._ids = itertools.count(1)
+
+    def close(self) -> None:
+        self.db.close()
+
+    def source(self, session: str) -> Path:
+        return Path(f"{self.path}#{session}")
+
+    def session(self, session: str, cwd: str) -> None:
+        now = int(time.time())
+        self.db.execute("INSERT INTO sessions VALUES (?, ?, ?, ?)", (session, cwd, now, now))
+        self.db.commit()
+
+    def add(self, session: str, nodes: list[tuple[int, int | None, dict[str, Any]]]) -> None:
+        """Insert (node id, parent node id, chat message) rows in order."""
+
+        now = int(time.time())
+        for node, parent, message in nodes:
+            self.db.execute(
+                "INSERT INTO message_nodes (session_id, node_id, parent_node_id, chat_message, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (session, node, parent, json.dumps(message), now),
+            )
+        self.db.execute("UPDATE sessions SET last_activity_at = ? WHERE id = ?", (now, session))
+        self.db.commit()
+
+    def message(self, role: str, content: str, minute: int, message_id: str | None = None,
+                source: str = "system", operation: str = "unknown", **fields: Any) -> dict[str, Any]:
+        metadata = {"is_user_input": fields.pop("is_user_input", None), "created_at": stamp(minute),
+                    "telemetry": {"source": source, "operation": operation}}
+        return {"message_id": message_id or f"m-{next(self._ids):08d}", "role": role,
+                "content": content, "metadata": metadata, **fields}
+
+    def prompt(self, minute: int, operation: str = "normal") -> dict[str, Any]:
+        return self.message("system", "You are Devin, an interactive command line agent.", minute,
+                            source="sysprompt", operation=operation)
+
+    def user(self, text: str, minute: int, message_id: str | None = None) -> dict[str, Any]:
+        return self.message("user", text, minute, message_id, source="user", is_user_input=True)
+
+    def reply(self, text: str, minute: int, calls: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        return self.message("assistant", text, minute, source="assistant", tool_calls=calls or [],
+                            thinking={"thinking": "THINKING-TEXT", "signature": "s"})
+
+
 def git_repo(path: Path, origin: str | None) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q", str(path)], check=True)
@@ -320,7 +385,7 @@ def git_repo(path: Path, origin: str | None) -> Path:
 
 class HistCase(unittest.TestCase):
     """A scratch machine: two Codex accounts, one root each for Claude Code,
-    Command Code, and OpenCode, and a hist home."""
+    Command Code, OpenCode, and Devin, and a hist home."""
 
     maxDiff = None
 
@@ -333,6 +398,7 @@ class HistCase(unittest.TestCase):
         self.claude = self.base / ".claude" / "projects"
         self.commandcode = self.base / ".commandcode" / "projects"
         self.opencode = self.base / ".local" / "share" / "opencode"
+        self.devin = self.base / ".local" / "share" / "devin" / "cli"
         for path in (self.codex, self.codex_state, self.codex2, self.claude, self.commandcode):
             path.mkdir(parents=True)
         self.home = self.base / "hist-home"
@@ -371,6 +437,11 @@ roots = ["{self.commandcode}"]
 adapter = "opencode"
 label = "opencode"
 roots = ["{self.opencode}"]
+
+[[sources]]
+adapter = "devin"
+label = "devin"
+roots = ["{self.devin}"]
 
 [view]
 inject = {inject}

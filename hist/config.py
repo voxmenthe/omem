@@ -14,7 +14,7 @@ from typing import Any, Literal
 
 HOME_ENV = "HIST_HOME"
 CONFIG_NAME = "config.toml"
-ADAPTERS = frozenset({"codex", "claude", "commandcode", "opencode"})
+ADAPTERS = frozenset({"codex", "claude", "commandcode", "devin", "opencode"})
 LABEL = re.compile(r"[a-z][a-z0-9-]{0,31}")
 WorkerView = Literal["header", "view", "none"]
 # Header plus 32 all-reference roots: the irreducible view of any timeline.

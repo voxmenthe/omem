@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from tests.hist.fixtures import (
-    Claude, Codex, CommandCode, HistCase, OpenCode, write_jsonl,
+    Claude, Codex, CommandCode, Devin, HistCase, OpenCode, write_jsonl,
 )
 
 BIG = "y" * 4000
@@ -256,6 +256,48 @@ class OpenCodeConformance(Conformance):
 
     def broken(self, number: int, minute: int) -> dict[str, Any]:
         return OpenCode.row("user", minute, files=[])
+
+
+class DevinConformance(Conformance):
+    label = "devin"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.host = Devin(self.devin)
+        self.addCleanup(self.host.close)
+        self.last: dict[str, int] = {}
+
+    def native(self, number: int) -> str:
+        return f"devin-conformance-{number:08d}"
+
+    def write(self, number: int, records: list[dict[str, Any]], fresh: bool = True) -> tuple[str, Path]:
+        native = self.native(number)
+        if fresh:
+            self.host.session(native, str(self.repo))
+            self.host.add(native, [(0, None, self.host.prompt(0))])
+            self.last[native] = 0
+        first = self.last[native] + 1
+        self.host.add(native, [(first + n, first + n - 1, record) for n, record in enumerate(records)])
+        self.last[native] = first + len(records) - 1
+        return native[-8:], self.host.source(native)
+
+    def user(self, number: int, text: str, minute: int) -> dict[str, Any]:
+        return self.host.user(text, minute)
+
+    def reply(self, number: int, text: str, minute: int) -> dict[str, Any]:
+        return self.host.reply(text, minute)
+
+    def injected(self, number: int, minute: int) -> list[dict[str, Any]]:
+        return [
+            self.host.message("user", "INJECTED keep-alive: continue", minute, source="user"),
+            self.host.message("system", "<available_skills>INJECTED</available_skills>", minute),
+        ]
+
+    def unknown(self, number: int, minute: int) -> dict[str, Any]:
+        return self.host.message("future", "UNKNOWN-TEXT", minute)
+
+    def broken(self, number: int, minute: int) -> dict[str, Any]:
+        return {**self.host.user("x", minute), "content": ["not", "text"]}
 
 
 del Conformance
