@@ -10,3 +10,5 @@ __pycache__/
 /PLANS/
 /PAPERS/
 .DS_Store
+/demo-scripts/histprobe/agy/
+/demo-scripts/histprobe/snapshots/
