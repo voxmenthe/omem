@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
+from .. import reader
 from ..reader import Record, read as read_records, Cursor
 from . import (
     IMAGE_OMITTED,
@@ -486,6 +487,7 @@ def hook_input(payload: dict[str, Any], event: str) -> HookInput:
 
 class _Codex:
     name = NAME
+    reader = reader
     discover = staticmethod(discover)
     head = staticmethod(head)
     map = staticmethod(map_records)

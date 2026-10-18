@@ -210,11 +210,11 @@ class _Live:
     timeline: int
     token: str
     committed: str
-    cursor: reader.Cursor
+    cursor: Any
     state0: dict[str, Any]
     state: dict[str, Any]
     frontier: str
-    records: list[reader.Record] = field(default_factory=list)
+    records: list[Any] = field(default_factory=list)
     messages: list[Message] = field(default_factory=list)
     done: bool = False
     # Progress, path, and token are saved through the end of the file.
@@ -227,7 +227,7 @@ class _Live:
 def _load_live(row: tuple[Any, ...], candidate: _Candidate) -> _Live:
     source_id, adapter_name, label, session, timeline, cursor_json, started, alias, klass, cwd = row
     stored = json.loads(cursor_json)
-    cursor = reader.Cursor.from_json(stored["reader"])
+    cursor = adapter(adapter_name).reader.Cursor.from_json(stored["reader"])
     state = stored["state"]
     live = _Live(
         row=source_id,
@@ -252,7 +252,7 @@ def _load_live(row: tuple[Any, ...], candidate: _Candidate) -> _Live:
     return live
 
 
-def _cursor_json(cursor: reader.Cursor, state: dict[str, Any]) -> str:
+def _cursor_json(cursor: Any, state: dict[str, Any]) -> str:
     return json.dumps({"reader": cursor.to_json(), "state": state}, sort_keys=True)
 
 
@@ -301,7 +301,7 @@ def _register(
                 "INSERT INTO sources (adapter, native_id, label, path, token, cursor, "
                 "session_id, state, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
             )
-            start = _cursor_json(reader.Cursor(), {})
+            start = _cursor_json(adapter(source.adapter).reader.Cursor(), {})
             if head is None:
                 db.execute(insert, (source.adapter, found.native_id, source.label,
                                     found.path, candidate.token, start, None,
@@ -325,8 +325,9 @@ def _register(
                                     "skipped", reason))
                 continue
             session = session_for(db, source.adapter, source.label, head, place)
+            cursor = adapter(source.adapter).reader.Cursor()
             db.execute(insert, (source.adapter, found.native_id, source.label,
-                                found.path, "", _cursor_json(reader.Cursor(), head.state),
+                                found.path, "", _cursor_json(cursor, head.state),
                                 session, "active", None))
             if head.parent:
                 db.execute(
@@ -362,8 +363,10 @@ def _commit(store: Store, group: list[_Live], report: Report) -> int:
         if consumed == len(live.records):
             cursor, state = live.cursor, live.state
         else:
-            cursor = live.records[consumed - 1].after if consumed else reader.Cursor.from_json(
-                json.loads(live.committed)["reader"]
+            cursor = (
+                live.records[consumed - 1].after
+                if consumed
+                else adapter(live.adapter).reader.Cursor.from_json(json.loads(live.committed)["reader"])
             )
             state = adapter(live.adapter).map(live.records[:consumed], live.state0)[1]
         plans.append((live, taken, consumed, cursor, state))
@@ -461,7 +464,7 @@ def _stop(store: Store, live: _Live, reason: str, report: Report) -> None:
 def _ingest(store: Store, group: list[_Live], deadline: float, report: Report) -> None:
     for live in group:
         try:
-            live.cursor, live.verified = reader.check(live.path, live.cursor)
+            live.cursor, live.verified = adapter(live.adapter).reader.check(live.path, live.cursor)
         except reader.SourceMismatch as error:
             _stop(store, live, f"transcript changed under its indexed prefix: {error}", report)
         except reader.UnsupportedFile as error:
@@ -479,7 +482,7 @@ def _ingest(store: Store, group: list[_Live], deadline: float, report: Report) -
             break
         live = min(open_sources, key=lambda s: s.frontier)
         try:
-            records, cursor = reader.read(live.path, live.cursor)
+            records, cursor = adapter(live.adapter).reader.read(live.path, live.cursor)
             messages, state = adapter(live.adapter).map(records, live.state)
         except Expectation as error:
             _stop(store, live, f"adapter expectation failed: {error}", report)
@@ -700,16 +703,17 @@ def verify(store: Store, session: str | None = None, wait: float = LOCK_WAIT_SEC
             return report
         with store.read() as db:
             rows = db.execute(
-                "SELECT s.id, s.label, s.path, s.cursor FROM sources s "
+                "SELECT s.id, s.adapter, s.label, s.path, s.cursor FROM sources s "
                 "JOIN sessions x ON x.id = s.session_id WHERE s.state = 'active' "
                 "AND (? IS NULL OR x.alias = ?) ORDER BY s.id",
                 (session, session),
             ).fetchall()
-        for row, label, path, cursor_json in rows:
-            cursor = reader.Cursor.from_json(json.loads(cursor_json)["reader"])
+        for row, adapter_name, label, path, cursor_json in rows:
+            source_reader = adapter(adapter_name).reader
+            cursor = source_reader.Cursor.from_json(json.loads(cursor_json)["reader"])
             name = f"{label}:{Path(path).name}"
             try:
-                reader.verify(Path(path), cursor)
+                source_reader.verify(Path(path), cursor)
             except reader.SourceMismatch as error:
                 with store.write() as db:
                     _stop_source(db, row, name, f"transcript changed under its indexed prefix: {error}")

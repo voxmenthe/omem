@@ -83,8 +83,21 @@ class Listing(Protocol):
     def __call__(self, path: str) -> tuple[list[str], list[str]] | None: ...
 
 
+class Reader(Protocol):
+    """Progress through a source: `hist.reader` for transcript files."""
+
+    Cursor: Any
+
+    def check(self, path: Path, cursor: Any) -> tuple[Any, bool]: ...
+
+    def read(self, path: Path, cursor: Any, max_bytes: int = ...) -> tuple[list[Any], Any]: ...
+
+    def verify(self, path: Path, cursor: Any) -> Any: ...
+
+
 class Adapter(Protocol):
     name: str
+    reader: Reader
 
     def discover(self, roots: tuple[Path, ...], listing: Listing) -> list[Found]: ...
 
