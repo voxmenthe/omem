@@ -2,16 +2,16 @@
 
 The hook records a shell-launched worker's parent link and alarms for
 transcripts outside every source. In repositories listed in `view.inject`,
-it also syncs (this session's transcript first) and prints the view for an
-interactive session or the short header for a worker. It never blocks the
-host: any failure prints a warning on stderr and nothing on stdout.
+it prints the indexed view for an interactive session or the short header
+for a worker, reading only the supplied session's metadata when its class is
+not indexed yet. Indexing and transcript verification belong to normal commands,
+not startup hooks. Any failure prints a warning on stderr and nothing on stdout.
 """
 
 import json
 import os
 import sqlite3
 import sys
-import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -20,9 +20,8 @@ from .commands import current_timeline, repository_identity, view, worker_header
 from .config import Config, load_config
 from .render import Timeline
 from .store import Store, StoreBusy, StoreError, utc_now
-from .sync import alarm, sync
+from .sync import alarm
 
-HOOK_SECONDS = 1.8
 EVENTS = frozenset({"SessionStart", "SubagentStart"})
 HOSTS = frozenset({"codex", "claude"})
 # Variables a host sets for commands it runs, naming the running session.
@@ -121,6 +120,14 @@ def _context(
             klass, timeline_id = "worker", None
         else:
             klass, timeline_id = ("worker" if parent is not None else "interactive"), None
+            if klass == "interactive" and host == "codex" and found.transcript is not None:
+                try:
+                    # Classify this session without locating or reading a fork parent's history.
+                    head = adapter(host).head(found.transcript, lambda _parent: None)
+                except FileNotFoundError:
+                    head = None
+                if head is not None:
+                    klass = head.session_class
         if klass == "interactive":
             timeline: Timeline | None = None
             if timeline_id is not None:
@@ -151,7 +158,6 @@ def _context(
 def run(host: str, event: str, payload: dict[str, Any], environment: Mapping[str, str], home: Path) -> str | None:
     """The additional context to print, or None."""
 
-    deadline = time.monotonic() + HOOK_SECONDS
     config = load_config(home)
     found = adapter(host).hook_input(payload, event)
     store = Store.open(home)
@@ -171,7 +177,6 @@ def run(host: str, event: str, payload: dict[str, Any], environment: Mapping[str
             injects = _injects(config, db, found.cwd or Path.cwd())
         if not injects or found.start in _NO_VIEW_STARTS:
             return None
-        sync(store, config, deadline=deadline, first={(host, found.session_id)})
         return _context(store, config, host, found, parent, environment)
     finally:
         store.close()

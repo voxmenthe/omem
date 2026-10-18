@@ -8,8 +8,8 @@ Search rows are omitted: the hook never searches. Each trial runs the real
 `hist hook claude SessionStart` command as a subprocess, as a host would.
 
 With --real-roots, the sources are this machine's Codex and Claude Code roots,
-so each hook also pays real discovery; transcripts written during the run are
-indexed into the temporary store, which is deleted afterwards.
+so setup and normal view-command trials also pay real discovery. Hooks only
+render the indexed snapshot. The temporary store is deleted afterwards.
 """
 
 import argparse

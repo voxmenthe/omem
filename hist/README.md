@@ -14,8 +14,9 @@ mkdir -p ~/.hist && cp hist/config.example.toml ~/.hist/config.toml   # default 
 hist sync --all && hist timelines
 ```
 
-Every read command syncs first, within one second, so `hist sync` is needed only
-for the first full index. `hist` with no arguments lists the commands.
+Normal read commands attempt an incremental sync before reading; `hist sync`
+explicitly refreshes the index. Startup hooks use the existing index without
+syncing. `hist` with no arguments lists the commands.
 
 ## Ways to use
 
@@ -167,7 +168,15 @@ replace it after upgrading.
 
 Without hooks, every command still works and capture is complete. The hook
 adds the view at session start, compaction, and clear in repositories listed in
-`view.inject`, and records the parent of shell-launched workers.
+`view.inject`, and records the parent of shell-launched workers. It serves the
+last indexed snapshot without scanning or verifying transcripts. Recent messages
+appear after a normal command such as `hist view` or an explicit `hist sync`;
+transcript integrity checks still run during indexing and `hist verify`. If no
+history is indexed for the repository yet, the hook prints nothing; run
+`hist sync` (or `hist sync --all` for pre-install history) to populate it.
+An unindexed Codex session can still be classified from its supplied transcript's
+metadata record, so standalone workers receive the worker header, not the
+interactive repository view; the hook does not resolve fork-parent history.
 
 From the checkout, `uv run scripts/install_hooks.py hist` reports what it would
 add to Claude Code's settings (in `CLAUDE_CONFIG_DIR`, default `~/.claude`) and

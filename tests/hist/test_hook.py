@@ -29,6 +29,7 @@ class HookTest(HistCase):
         return result.stdout, result.stderr
 
     def test_a_new_session_in_an_injected_repository_starts_with_the_view(self) -> None:
+        self.hist("sync")
         out, _ = self.claude_start(NEW)
         payload = json.loads(out)["hookSpecificOutput"]
         self.assertEqual(payload["hookEventName"], "SessionStart")
@@ -36,6 +37,104 @@ class HookTest(HistCase):
         self.assertTrue(context.startswith("<hist>\n"), context)
         self.assertIn("we chose the table-driven guard", context)
         self.assertLessEqual(len(context.encode()), 8000)
+
+    def test_hooks_leave_pending_transcripts_for_normal_commands(self) -> None:
+        self.hist("sync")
+        db = self.db()
+        indexed = db.execute("SELECT path, token, cursor, state FROM sources").fetchall()
+        messages = db.execute("SELECT count(*) FROM messages").fetchone()[0]
+        pending = "this message arrived after the index was refreshed"
+        write_jsonl(Codex.path(self.codex, PRIOR), [Codex.user(pending, 3)])
+        for host in ("codex", "claude"):
+            for event, source in (("SessionStart", "startup"), ("SessionStart", "compact"),
+                                  ("SessionStart", "clear"), ("SubagentStart", "startup")):
+                with self.subTest(host=host, event=event, source=source):
+                    payload = {"session_id": NEW, "agent_id": WORKER, "cwd": str(self.repo),
+                               "hook_event_name": event, "source": source}
+                    result = self.hist("hook", host, event, stdin=json.dumps(payload))
+                    self.assertEqual(result.stderr, "")
+                    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+                    self.assertNotIn(pending, context)
+                    if event == "SessionStart":
+                        self.assertIn("we chose the table-driven guard", context)
+                    self.assertEqual(db.execute("SELECT count(*) FROM messages").fetchone()[0], messages)
+                    self.assertEqual(db.execute("SELECT path, token, cursor, state FROM sources").fetchall(),
+                                     indexed)
+        self.assertIn(pending, self.hist("view").stdout)
+        self.assertEqual(db.execute("SELECT count(*) FROM messages").fetchone()[0], messages + 1)
+
+    def test_hook_defers_changed_archive_verification_to_sync(self) -> None:
+        self.hist("sync")
+        db = self.db()
+        indexed = db.execute("SELECT path, token, cursor, state FROM sources").fetchall()
+        path = Codex.path(self.codex, PRIOR)
+        archived = Codex.path(self.codex, PRIOR, archived=True)
+        archived.parent.mkdir(parents=True)
+        path.rename(archived)
+        archived.write_bytes(archived.read_bytes().replace(b"we chose", b"WE chose"))
+        out, err = self.claude_start(NEW)
+        self.assertEqual(err, "")
+        context = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("we chose the table-driven guard", context)
+        self.assertEqual(db.execute("SELECT path, token, cursor, state FROM sources").fetchall(), indexed)
+        self.hist("sync")
+        state, reason = db.execute("SELECT state, reason FROM sources").fetchone()
+        self.assertEqual(state, "stopped")
+        self.assertIn("transcript changed under its indexed prefix", reason)
+        self.assertEqual(db.execute("SELECT text FROM messages WHERE kind = 'user'").fetchall(),
+                         [("we chose the table-driven guard",)])
+
+    def test_hook_without_cached_history_leaves_sources_unindexed(self) -> None:
+        out, err = self.claude_start(NEW)
+        self.assertEqual((out, err), ("", ""))
+        db = self.db()
+        self.assertEqual(db.execute("SELECT count(*) FROM sources").fetchone(), (0,))
+        self.assertEqual(db.execute("SELECT count(*) FROM messages").fetchone(), (0,))
+        self.hist("sync")
+        self.assertIn("we chose the table-driven guard", self.claude_start(NEW)[0])
+
+    def test_subagent_context_respects_worker_view_before_indexing(self) -> None:
+        self.hist("sync")
+        for host in ("codex", "claude"):
+            for mode in ("header", "view", "none"):
+                with self.subTest(host=host, mode=mode):
+                    self.write_config(extra=f'worker = "{mode}"')
+                    payload = {"session_id": PARENT, "agent_id": WORKER, "cwd": str(self.repo),
+                               "hook_event_name": "SubagentStart"}
+                    result = self.hist("hook", host, "SubagentStart", stdin=json.dumps(payload))
+                    self.assertEqual(result.stderr, "")
+                    if mode == "none":
+                        self.assertEqual(result.stdout, "")
+                    else:
+                        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+                        self.assertTrue(context.startswith("<hist>\n"))
+                        self.assertEqual("we chose the table-driven guard" in context, mode == "view")
+        db = self.db()
+        self.assertEqual(db.execute("SELECT count(*) FROM links").fetchone(), (0,))
+        self.assertEqual(db.execute("SELECT count(*) FROM sessions WHERE native_id = ?", (WORKER,)).fetchone(),
+                         (0,))
+
+    def test_unindexed_codex_callers_keep_their_session_class(self) -> None:
+        self.hist("sync")
+        for number, source in enumerate(("exec", "mcp", "cli", "vscode", "missing", "empty")):
+            with self.subTest(source=source):
+                session = f"6c000000-0000-4000-8000-{number:012x}"
+                path = write_jsonl(Codex.path(self.codex, session), [
+                    Codex.meta(session, str(self.repo), source, self.origin),
+                ])
+                if source == "missing":
+                    path.unlink()
+                elif source == "empty":
+                    path.write_bytes(b"")
+                payload = {"session_id": session, "transcript_path": str(path), "cwd": str(self.repo),
+                           "hook_event_name": "SessionStart", "source": "startup"}
+                result = self.hist("hook", "codex", "SessionStart", stdin=json.dumps(payload))
+                self.assertEqual(result.stderr, "")
+                context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+                self.assertTrue(context.startswith("<hist>\n"))
+                self.assertEqual("we chose the table-driven guard" in context, source not in ("exec", "mcp"))
+        db = self.db()
+        self.assertEqual(db.execute("SELECT count(*) FROM sessions").fetchone(), (1,))
 
     def test_resume_and_uninjected_repositories_print_nothing(self) -> None:
         self.assertEqual(self.claude_start(NEW, source="resume")[0], "")

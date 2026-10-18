@@ -29,10 +29,12 @@ command that continues it.
 ### Let the view orient each session
 
 In repositories listed in `view.inject`, the hook puts the history view at the
-top of every new session, and again after compaction or `/clear`. There is
-nothing to run: the agent zooms into what the current task needs. Elsewhere,
-`hist view` prints the same view on demand, and `hist view myrepo` shows another
-repository's.
+top of every new session, and again after compaction or `/clear`. It uses the
+last indexed snapshot: the hook does not scan transcripts or refresh the index.
+Normal commands such as `hist view` refresh it; `hist sync` explicitly indexes
+pending transcripts. Until the repository has indexed history, the hook prints
+nothing. The agent zooms into what the current task needs. Elsewhere, `hist view`
+prints the view on demand, and `hist view myrepo` shows another repository's.
 
 ### Continue work across tools and accounts
 
