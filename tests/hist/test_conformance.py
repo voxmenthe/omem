@@ -9,7 +9,9 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from tests.hist.fixtures import Claude, Codex, HistCase, write_jsonl
+from tests.hist.fixtures import (
+    Claude, Codex, CommandCode, HistCase, write_jsonl,
+)
 
 BIG = "y" * 4000
 
@@ -180,6 +182,39 @@ class ClaudeConformance(Conformance):
     def broken(self, number: int, minute: int) -> dict[str, Any]:
         record = Claude.user(self._uuid(), self.native(number), str(self.repo), "x", minute)
         del record["message"]
+        return record
+
+
+class CommandCodeConformance(Conformance):
+    label = "commandcode"
+
+    def native(self, number: int) -> str:
+        return f"cc000000-0000-4000-8000-00000000c{number:03d}"
+
+    def transcript(self, number: int) -> tuple[str, Path]:
+        native = self.native(number)
+        path = CommandCode.path(self.commandcode, str(self.repo), native)
+        CommandCode.write_meta(path)
+        return native[-8:], path
+
+    def opening(self, number: int) -> list[dict[str, Any]]:
+        return [CommandCode.session(self.native(number), str(self.repo))]
+
+    def user(self, number: int, text: str, minute: int) -> dict[str, Any]:
+        return CommandCode.user(text, minute)
+
+    def reply(self, number: int, text: str, minute: int) -> dict[str, Any]:
+        return CommandCode.assistant([{"type": "text", "text": text}], minute)
+
+    def injected(self, number: int, minute: int) -> list[dict[str, Any]]:
+        return [CommandCode.user("Please continue your response. INJECTED", minute, source="followup")]
+
+    def unknown(self, number: int, minute: int) -> dict[str, Any]:
+        return {"type": "future_record", "id": "f0", "timestamp": "x", "text": "UNKNOWN-TEXT"}
+
+    def broken(self, number: int, minute: int) -> dict[str, Any]:
+        record = CommandCode.user("x", minute)
+        del record["message"]["content"]
         return record
 
 

@@ -107,6 +107,7 @@ class Adapter(Protocol):
         self, records: list[Record], state: dict[str, Any]
     ) -> tuple[list[Message], dict[str, Any]]: ...
 
+    # Only hosts with a start hook (`hook.HOSTS`) define this.
     def hook_input(self, payload: dict[str, Any], event: str) -> HookInput: ...
 
 
@@ -205,7 +206,11 @@ def count_unknown(state: dict[str, Any], what: str) -> None:
 
 
 def adapter(name: str) -> Adapter:
-    from . import claude, codex
+    from . import claude, codex, commandcode
 
-    adapters: dict[str, Adapter] = {"codex": codex.ADAPTER, "claude": claude.ADAPTER}
+    adapters: dict[str, Adapter] = {
+        "codex": codex.ADAPTER,
+        "claude": claude.ADAPTER,
+        "commandcode": commandcode.ADAPTER,
+    }
     return adapters[name]

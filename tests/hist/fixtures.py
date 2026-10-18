@@ -1,10 +1,12 @@
 """Transcript fixtures in the record shapes observed on this machine in M0.
 
 Codex records model CLI 0.162 (paginated session_meta, content_item_kinds)
-and the pre-0.2 legacy layout; Claude Code records model 2.1.295. Text is
-synthetic; structure, field names, and injected-context markers are real.
+and the pre-0.2 legacy layout; Claude Code records model 2.1.295; Command
+Code records model CLI 1.83 (format version 3). Text is synthetic; structure,
+field names, and injected-context markers are real.
 """
 
+import itertools
 import json
 import os
 import sqlite3
@@ -187,6 +189,48 @@ class Claude:
         return {"type": kind, "sessionId": session, **fields}
 
 
+class CommandCode:
+    """Command Code transcript records and the session's metadata file."""
+
+    _ids = itertools.count(1)
+
+    @staticmethod
+    def path(root: Path, cwd: str, session: str) -> Path:
+        return root / "".join(c if c.isalnum() else "-" for c in cwd.strip("/").lower()) / f"{session}.jsonl"
+
+    @staticmethod
+    def write_meta(path: Path, **fields: Any) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.with_name(f"{path.stem}.meta.json").write_text(json.dumps({"traceIds": [], **fields}))
+
+    @staticmethod
+    def session(session: str, cwd: str, minute: int = 0) -> dict[str, Any]:
+        return {"type": "session", "version": 3, "id": session, "timestamp": stamp(minute), "cwd": cwd}
+
+    @classmethod
+    def message(cls, role: str, source: str | None, blocks: list[dict[str, Any]], minute: int,
+                **meta: Any) -> dict[str, Any]:
+        number = next(cls._ids)
+        fields: dict[str, Any] = {"messageId": f"00000000-0000-4000-8000-{number:012d}", **meta}
+        if source is not None:
+            fields["source"] = source
+        return {"type": "message", "id": f"{number:08x}", "parentId": None, "timestamp": stamp(minute),
+                "message": {"role": role, "content": blocks, "meta": fields}}
+
+    @classmethod
+    def user(cls, text: str, minute: int, source: str | None = "user", **meta: Any) -> dict[str, Any]:
+        return cls.message("user", source, [{"type": "text", "text": text}], minute, **meta)
+
+    @classmethod
+    def assistant(cls, blocks: list[dict[str, Any]], minute: int) -> dict[str, Any]:
+        return cls.message("assistant", "model", blocks, minute)
+
+    @classmethod
+    def tool_result(cls, tool_id: str, text: str, minute: int) -> dict[str, Any]:
+        return cls.message("user", "tool", [{"type": "tool_result", "tool_use_id": tool_id,
+                                             "content": [{"type": "text", "text": text}]}], minute)
+
+
 def git_repo(path: Path, origin: str | None) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q", str(path)], check=True)
@@ -196,7 +240,8 @@ def git_repo(path: Path, origin: str | None) -> Path:
 
 
 class HistCase(unittest.TestCase):
-    """A scratch machine: two Codex accounts, one Claude Code root, a hist home."""
+    """A scratch machine: two Codex accounts, one root each for Claude Code
+    and Command Code, and a hist home."""
 
     maxDiff = None
 
@@ -207,7 +252,8 @@ class HistCase(unittest.TestCase):
         self.codex_state = self.base / ".codex-state"
         self.codex2 = self.base / ".codex2"
         self.claude = self.base / ".claude" / "projects"
-        for path in (self.codex, self.codex_state, self.codex2, self.claude):
+        self.commandcode = self.base / ".commandcode" / "projects"
+        for path in (self.codex, self.codex_state, self.codex2, self.claude, self.commandcode):
             path.mkdir(parents=True)
         self.home = self.base / "hist-home"
         self.repo = git_repo(self.base / "work" / "proj", "git@github.com:me/proj.git")
@@ -235,6 +281,11 @@ roots = ["{self.codex2}"]
 adapter = "claude"
 label = "claude"
 roots = ["{self.claude}"]
+
+[[sources]]
+adapter = "commandcode"
+label = "commandcode"
+roots = ["{self.commandcode}"]
 
 [view]
 inject = {inject}
