@@ -1,9 +1,10 @@
 ## Session history (`hist`)
 
-- `hist` is a read-only, verbatim record of every Codex and Claude Code session
-  on this machine. Curated memory, where you have it, holds lessons and
-  preferences; `hist` holds what was actually said and done. Use it when you
-  need the exact earlier words, output, or decision:
+- `hist` is a read-only, verbatim record of every Codex, Claude Code, Command
+  Code, OpenCode, Devin, and Antigravity CLI session on this machine. Curated
+  memory, where you have it, holds lessons and preferences; `hist` holds what
+  was actually said and done. Use it when you need the exact earlier words,
+  output, or decision:
   - the user points back to earlier work, in any repository or host;
   - compaction cost you an exact detail;
   - an error looks familiar: `hist find "<text>" --all`;

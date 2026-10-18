@@ -2,10 +2,22 @@
 
 import shutil
 
-from tests.hist.fixtures import REPO_ROOT, Claude, Codex, HistCase, write_jsonl
+from tests.hist.fixtures import (
+    REPO_ROOT,
+    Antigravity,
+    Claude,
+    Codex,
+    CommandCode,
+    Devin,
+    HistCase,
+    OpenCode,
+    write_jsonl,
+)
 
 T1 = "019a0000-0000-7000-8000-00000000e0d1"
 S2 = "3f2a0000-0000-4000-8000-0000000e1a02"
+C3 = "cc000000-0000-4000-8000-0000000e1a03"
+A4 = "a9000000-0000-4000-8000-0000000e1a04"
 
 
 class NewUserTest(HistCase):
@@ -20,11 +32,24 @@ class NewUserTest(HistCase):
         write_jsonl(Claude.project(self.claude, cwd) / f"{S2}.jsonl", [
             Claude.user("u1", S2, cwd, "claude: review the guard", 3, promptSource="typed"),
         ])
+        commandcode = CommandCode.path(self.commandcode, cwd, C3)
+        CommandCode.write_meta(commandcode)
+        write_jsonl(commandcode, [CommandCode.session(C3, cwd, 4), CommandCode.user("commandcode: and now?", 4)])
+        opencode, devin, antigravity = OpenCode(self.opencode), Devin(self.devin), Antigravity(self.antigravity)
+        for host in (opencode, devin, antigravity):
+            self.addCleanup(host.close)
+        opencode.session("ses_newuser0000e1a5", cwd)
+        opencode.add("ses_newuser0000e1a5", [OpenCode.user("opencode: and now?", 5), OpenCode.idle(5)])
+        devin.session("devin-newuser-e1a6", cwd)
+        devin.add("devin-newuser-e1a6", [(0, None, devin.prompt(6)), (1, 0, devin.user("devin: and now?", 6))])
+        antigravity.conversation(A4, cwd)
+        antigravity.add(A4, [Antigravity.user("antigravity: and now?", 7)])
+        antigravity.finish(A4)
         home = {"HOME": str(self.base)}
         self.hist("sync", "--all", env=home)
         status = self.hist("status", env=home).stdout
-        self.assertIn("codex (codex): 1 indexed", status)
-        self.assertIn("claude (claude): 1 indexed", status)
+        for label in ("codex", "claude", "commandcode", "opencode", "devin", "antigravity"):
+            self.assertIn(f"{label} ({label}): 1 indexed", status)
 
     def test_instructions_print_the_packaged_block_before_any_configuration(self) -> None:
         (self.home / "config.toml").unlink()

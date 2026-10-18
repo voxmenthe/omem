@@ -1,7 +1,7 @@
 # Using hist
 
-`hist` is a verbatim, read-only record of every Codex and Claude Code session
-on this machine. OMem holds curated lessons and preferences; `hist` holds what
+`hist` is a verbatim, read-only record of every Codex, Claude Code, Command
+Code, OpenCode, Devin, and Antigravity CLI session on this machine. OMem holds curated lessons and preferences; `hist` holds what
 was actually said and done. Check memory first for how to work, and use `hist`
 when the exact earlier words, output, or decision matter. Setup and
 configuration are in [README.md](README.md).
@@ -38,8 +38,8 @@ prints the view on demand, and `hist view myrepo` shows another repository's.
 
 ### Continue work across tools and accounts
 
-Codex, a second Codex account, and Claude Code share one timeline per
-repository, so one tool can pick up what another did:
+Codex, a second Codex account, Claude Code, and the other indexed hosts share
+one timeline per repository, so one tool can pick up what another did:
 
 > Pick up where yesterday's Codex session left off on the parser.
 
@@ -91,7 +91,9 @@ hist read 934fad40          # one worker's messages, in order
 Codex workers and Claude Code subagents are linked to their parents
 automatically. A Claude Code worker started from a Claude Code shell is linked
 only when its launcher exports `HIST_PARENT` (see [README.md](README.md)).
-Workers on other hosts, such as Devin, OpenCode, or Kimi, are not recorded.
+OpenCode and Antigravity subagents are linked to their parents too. A worker
+on any other host, such as Devin, is recorded but not linked to the session
+that started it, and Kimi sessions are not recorded.
 
 ### Audit or replay a session
 
@@ -132,4 +134,6 @@ the contract for writing your own.
   keys and tokens; anything else typed into a session stays in the store.
 - Every command needs write access to `~/.hist`, so `hist` fails inside a
   sandbox that blocks it.
-- Only Codex and Claude Code sessions are indexed.
+- Only Codex, Claude Code, Command Code, OpenCode, Devin, and Antigravity CLI
+  sessions are indexed, and only Codex and Claude Code show the view. The
+  other hosts' limits are in [README.md](README.md#other-hosts).

@@ -17,9 +17,29 @@ adapter = "claude"
 label = "claude"
 roots = ["~/.claude/projects"]
 
+[[sources]]
+adapter = "commandcode"
+label = "commandcode"
+roots = ["~/.commandcode/projects"]
+
+[[sources]]                        # holds opencode.db
+adapter = "opencode"
+label = "opencode"
+roots = ["~/.local/share/opencode"]
+
+[[sources]]                        # holds sessions.db
+adapter = "devin"
+label = "devin"
+roots = ["~/.local/share/devin/cli"]
+
+[[sources]]                        # the CLI's store, not the IDE's ~/.gemini/antigravity
+adapter = "antigravity"
+label = "antigravity"
+roots = ["~/.gemini/antigravity-cli"]
+
 [discovery]
 # Scanned only to report session stores that no source claims.
-watch = ["~/.codex*", "~/.claude*", "~/.kimi*", "~/.local/share/opencode", "~/.gemini/antigravity"]
+watch = ["~/.codex*", "~/.claude*", "~/.commandcode*", "~/.kimi*", "~/.local/share/opencode", "~/.gemini/antigravity"]
 exclude = []                       # paths or repositories never indexed
 
 [view]

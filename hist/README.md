@@ -1,7 +1,7 @@
 # hist
 
-`hist` indexes every Codex and Claude Code session on this machine into one
-SQLite store and lets agents navigate it with short, bounded commands. Sessions
+`hist` indexes every Codex, Claude Code, Command Code, OpenCode, Devin, and
+Antigravity CLI session on this machine into one SQLite store and lets agents navigate it with short, bounded commands. Sessions
 in one repository share a timeline across hosts and accounts; workers and
 subagents get their own linked timelines. It is read-only history: agents never
 write it, and it never changes OMem.
@@ -40,7 +40,8 @@ transcript locations; `hist` reads no host environment variables to find them.
 The parser rejects unknown keys and overlapping roots. Keys:
 
 - `[[sources]]`: one per host installation or account, with `adapter`
-  (`codex` or `claude`), a `label` shown in message headers, and `roots`.
+  (`codex`, `claude`, `commandcode`, `opencode`, `devin`, or `antigravity`), a
+  `label` shown in message headers, and `roots`.
 - `[discovery]`: `watch` patterns are scanned only to report unclaimed session
   stores in `hist status`; `exclude` lists paths or repositories never indexed.
 - `[view]`: `bytes` caps the injected view; `worker` is what a worker sees at
@@ -55,6 +56,36 @@ Sources written before the store was created wait for `hist sync --all`, which
 transcripts found later are indexed by ordinary syncs. Measured here, every
 transcript on the machine (32,483 sources, 35 GB, 2.75 million messages) took
 30 minutes and an 11.2 GB store.
+
+## Other hosts
+
+Command Code, OpenCode, Devin, and the Antigravity CLI have no start hook, so
+their sessions are indexed and searchable but are never shown the view or the
+worker header. A subagent links to the session that started it on the same
+host; a session started from another host's shell is not linked. Each
+adapter's docstring in `hist/adapters/` describes its store.
+
+- Command Code (`~/.commandcode/projects`): a session is interactive unless its
+  `<session>.meta.json` marks a headless `print` run, and unclassified without
+  that file. Skill bodies and reminders the host adds to a prompt are not
+  stored.
+- OpenCode (`~/.local/share/opencode`, `opencode.db`): a turn is indexed once
+  OpenCode ends it, so the turn in progress does not appear yet. A session the
+  TUI has shown is interactive. Sessions migrated from OpenCode 1.x are read
+  from the migrated rows and count as interactive with a second prompt.
+- Devin (`~/.local/share/devin/cli`, `sessions.db`): Devin records nothing that
+  tells a typed session from a headless one, so every session is a worker. Only
+  the main conversation is indexed; subagent, sidekick, and summarizer chains
+  are not, nor are `hist summarize devin`'s own runs. Devin occasionally
+  rewrites a stored message (3 of 1,493 sessions here), which stops that
+  session like any rewritten transcript.
+- Antigravity CLI (`~/.gemini/antigravity-cli`): while the CLI holds a
+  conversation open, reading stops at the first step still running; once it
+  closes, every step is read. A conversation is interactive when its id is in
+  the CLI's prompt history or it has a second prompt, and a worker when started
+  with `-p`. Results of the older, specific tool steps (view file, run command,
+  ...) are counted in `hist status`, not indexed; the calls are. The
+  Antigravity IDE's store, `~/.gemini/antigravity`, is not read.
 
 ## Summaries (optional)
 
@@ -245,4 +276,6 @@ uv run python benchmarks/hist_hook_latency.py          # hook p95 on a million-m
 
 Tests drive the `hist` command against fixture transcripts shaped like real
 records (`tests/hist/fixtures.py`). A new host adds an adapter under
-`hist/adapters/` and a subclass in `tests/hist/test_conformance.py`.
+`hist/adapters/` and a subclass in `tests/hist/test_conformance.py`. A host
+that keeps sessions in a database reads them through `hist/rows.py`, and its
+subclass overrides `write`.

@@ -33,8 +33,8 @@ boundaries](#storage-and-failure-boundaries) before trusting it with important
 work.
 
 The same install also provides [`hist`](hist/README.md), a separate command
-that indexes every Codex and Claude Code session on the machine into one
-searchable, verbatim record. 
+that indexes every Codex, Claude Code, Command Code, OpenCode, Devin, and
+Antigravity CLI session on the machine into one searchable, verbatim record. 
 `hist` borrows heavily from Victor Taelin's UniiChat (https://uniichat.com/) 
 for inspiration.
 
