@@ -2,7 +2,7 @@
 
 import json
 
-from tests.hist.fixtures import CommandCode, Devin, HistCase, OpenCode, write_jsonl
+from tests.hist.fixtures import Antigravity, CommandCode, Devin, HistCase, OpenCode, protobuf, write_jsonl
 
 TYPED = "cc000000-0000-4000-8000-0000000000a1"
 PRINTED = "cc000000-0000-4000-8000-0000000000b2"
@@ -211,3 +211,76 @@ class DevinTest(InstalledCase):
         for marker in (b"SUBAGENT-", b"SUMMARY-TEXT", b"SUMMARIZER-PROMPT", b"THINKING-TEXT"):
             self.assertNotStored(marker)
         self.assertNotIn("unknown record types", self.hist("status").stdout)
+
+
+class AntigravityTest(InstalledCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.host = Antigravity(self.antigravity)
+        self.addCleanup(self.host.close)
+
+    def texts(self, native: str) -> list[tuple[str, str | None, str]]:
+        return self.db().execute(
+            "SELECT kind, tool, text FROM messages m JOIN sessions s ON s.id = m.session_id "
+            "WHERE s.native_id = ? AND m.record >= 0 ORDER BY position",
+            (native,),
+        ).fetchall()
+
+    def test_steps_map_and_wait_while_not_final(self) -> None:
+        host, native = self.host, "a9000000-0000-4000-8000-0000000000e1"
+        host.conversation(native, str(self.repo), self.origin)
+        host.typed(native, "fix the guard")
+        error = protobuf((3, protobuf((1, "The model produced an invalid tool call."), (2, "invalid_args"))))
+        host.add(native, [
+            Antigravity.user("fix the guard", 1),
+            Antigravity.reply("", 2, calls=(("view_file", '{"AbsolutePath":"guard.py"}'),), thinking="THINKING"),
+            Antigravity.result("view_file", "def guard(): ...", 2),
+            Antigravity.step(101, 2, (114, protobuf((1, "SYSTEM-MESSAGE")))),
+            Antigravity.step(23, 3, (30, protobuf((5, "SESSION-SUMMARY")))),
+            Antigravity.step(17, 3, (24, error)),
+            Antigravity.reply("guard fixed", 4, status=Antigravity.RUNNING),
+            Antigravity.user("and the tests?", 5),
+        ])
+        self.hist("sync")
+        expected = [
+            ("user", None, "fix the guard"),
+            ("tool_call", "view_file", '{"AbsolutePath":"guard.py"}'),
+            ("tool_result", "view_file", "def guard(): ..."),
+            ("event", None, "context compacted"),
+            ("event", None, "The model produced an invalid tool call."),
+        ]
+        self.assertEqual(self.texts(native), expected)
+        for marker in (b"THINKING", b"SYSTEM-MESSAGE", b"SESSION-SUMMARY", b"guard fixed"):
+            self.assertNotStored(marker)
+        host.set_status(native, 6, Antigravity.DONE)
+        host.add(native, [Antigravity.reply("tests pass", 6, status=Antigravity.RUNNING)])
+        self.hist("sync")
+        expected += [("agent", None, "guard fixed"), ("user", None, "and the tests?")]
+        self.assertEqual(self.texts(native), expected)
+        # A closed conversation's steps are all final.
+        host.finish(native)
+        self.hist("sync")
+        self.assertEqual(self.texts(native), expected + [("agent", None, "tests pass")])
+
+    def test_conversations_are_classified_by_history_flag_parent_and_prompts(self) -> None:
+        cwd = str(self.repo)
+        typed, printed, child, open_, closed, chatty = (
+            f"a9000000-0000-4000-8000-0000000000f{n}" for n in range(1, 7))
+        for native in (typed, printed, child, open_, closed, chatty):
+            self.host.conversation(native, cwd, parent=typed if native == child else None)
+            prompts = [Antigravity.user(f"{native} prompt", 1, printed=native == printed)]
+            if native == chatty:
+                prompts.append(Antigravity.user("a second prompt", 2))
+            self.host.add(native, prompts)
+        self.host.typed(typed, "typed prompt")
+        self.host.finish(closed)
+        self.hist("sync")
+        classes = dict(self.db().execute("SELECT native_id, class FROM sessions").fetchall())
+        # An open conversation with neither sign waits for its prompt history.
+        self.assertEqual(classes, {typed: "interactive", printed: "worker", child: "subagent",
+                                   closed: "worker", chatty: "interactive"})
+        self.host.typed(open_, "typed prompt")
+        self.hist("sync")
+        self.assertEqual(
+            self.db().execute("SELECT class FROM sessions WHERE native_id = ?", (open_,)).fetchone(),
+            ("interactive",))

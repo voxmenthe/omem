@@ -3,8 +3,8 @@
 Codex records model CLI 0.162 (paginated session_meta, content_item_kinds)
 and the pre-0.2 legacy layout; Claude Code records model 2.1.295; Command
 Code records model CLI 1.83 (format version 3); OpenCode tables model 2.0.31;
-Devin tables model CLI 3000.10. Text is synthetic; structure, field names,
-and injected-context markers are real.
+Devin tables model CLI 3000.10; Antigravity steps model CLI 1.4. Text is
+synthetic; structure, field names, and injected-context markers are real.
 """
 
 import itertools
@@ -375,6 +375,129 @@ class Devin:
                             thinking={"thinking": "THINKING-TEXT", "signature": "s"})
 
 
+def protobuf(*fields: tuple[int, int | str | bytes]) -> bytes:
+    """Protobuf wire format: varints for ints, length-delimited otherwise."""
+
+    def varint(value: int) -> bytes:
+        out = bytearray()
+        while True:
+            byte, value = value & 0x7F, value >> 7
+            out.append(byte | (0x80 if value else 0))
+            if not value:
+                return bytes(out)
+
+    out = bytearray()
+    for number, value in fields:
+        if isinstance(value, int):
+            out += varint(number << 3) + varint(value)
+        else:
+            data = value.encode("utf-8", "surrogatepass") if isinstance(value, str) else value
+            out += varint(number << 3 | 2) + varint(len(data)) + data
+    return bytes(out)
+
+
+class Antigravity:
+    """Antigravity CLI conversation databases and prompt history. Steps are
+    encoded by the field numbers hist reads; an open conversation keeps its
+    connection, and so its `-wal` file, open."""
+
+    DONE, RUNNING = 3, 2
+
+    def __init__(self, root: Path) -> None:
+        self.conversations = root / "conversations"
+        self.conversations.mkdir(parents=True, exist_ok=True)
+        self.history = root / "history.jsonl"
+        self.open: dict[str, sqlite3.Connection] = {}
+
+    def close(self) -> None:
+        for db in self.open.values():
+            db.close()
+        self.open.clear()
+
+    def path(self, conversation: str) -> Path:
+        return self.conversations / f"{conversation}.db"
+
+    def conversation(self, conversation: str, cwd: str | None, origin: str | None = None,
+                     parent: str | None = None, minute: int = 0) -> None:
+        db = sqlite3.connect(self.path(conversation))
+        db.execute("PRAGMA journal_mode=WAL")
+        db.executescript(
+            "CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER NOT NULL, "
+            "status INTEGER NOT NULL, step_payload BLOB NOT NULL);"
+            "CREATE TABLE trajectory_metadata_blob (data BLOB NOT NULL);"
+        )
+        workspace = protobuf((1, Path(cwd).as_uri()), (3, protobuf((2, origin)))) if cwd and origin else (
+            protobuf((1, Path(cwd).as_uri())) if cwd else b"")
+        fields: list[tuple[int, int | str | bytes]] = [(2, self.timestamp(minute))]
+        if workspace:
+            fields.append((1, workspace))
+        if parent:
+            fields.append((5, parent))
+        db.execute("INSERT INTO trajectory_metadata_blob VALUES (?)", (protobuf(*fields),))
+        db.commit()
+        self.open[conversation] = db
+
+    def typed(self, conversation: str, text: str) -> None:
+        with self.history.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"display": text, "timestamp": 0, "conversationId": conversation}) + "\n")
+
+    def add(self, conversation: str, steps: list[tuple[int, int, bytes]]) -> None:
+        """Append (step type, status, payload) steps."""
+
+        db = self.open[conversation]
+        (last,) = db.execute("SELECT coalesce(max(idx), -1) FROM steps").fetchone()
+        for idx, (kind, status, payload) in enumerate(steps, last + 1):
+            db.execute("INSERT INTO steps VALUES (?, ?, ?, ?)", (idx, kind, status, payload))
+        db.commit()
+
+    def finish(self, conversation: str) -> None:
+        """Close the conversation as the CLI does on exit, removing its `-wal`."""
+
+        self.open.pop(conversation).close()
+
+    def set_status(self, conversation: str, idx: int, status: int) -> None:
+        db = self.open[conversation]
+        (payload,) = db.execute("SELECT step_payload FROM steps WHERE idx = ?", (idx,)).fetchone()
+        db.execute("UPDATE steps SET status = ?, step_payload = ? WHERE idx = ?",
+                   (status, payload + protobuf((4, status)), idx))
+        db.commit()
+
+    @staticmethod
+    def timestamp(minute: int) -> bytes:
+        return protobuf((1, epoch_ms(minute) // 1000))
+
+    @classmethod
+    def step(cls, kind: int, minute: int, body: tuple[int, bytes] | None = None,
+             status: int = DONE, tool: str | None = None) -> tuple[int, int, bytes]:
+        metadata = [(1, cls.timestamp(minute))]
+        if tool:
+            metadata.append((4, protobuf((1, "call-1"), (2, tool))))
+        fields: list[tuple[int, int | str | bytes]] = [(1, kind), (4, status), (5, protobuf(*metadata))]
+        if body:
+            fields.append(body)
+        return kind, status, protobuf(*fields)
+
+    @classmethod
+    def user(cls, text: str, minute: int, printed: bool = False) -> tuple[int, int, bytes]:
+        body: list[tuple[int, int | str | bytes]] = [(2, text)]
+        if printed:
+            # user_config.planner_config.tool_config.mcp.non_blocking_turn_load = false
+            tool_config = protobuf((16, protobuf((4, 0))))
+            body.append((12, protobuf((1, protobuf((13, tool_config))))))
+        return cls.step(14, minute, (19, protobuf(*body)))
+
+    @classmethod
+    def reply(cls, text: str, minute: int, calls: tuple[tuple[str, str], ...] = (), status: int = DONE,
+              thinking: str = "") -> tuple[int, int, bytes]:
+        body: list[tuple[int, int | str | bytes]] = [(1, text), (8, text), (3, thinking)]
+        body += [(7, protobuf((1, f"call-{name}"), (2, name), (3, arguments))) for name, arguments in calls]
+        return cls.step(15, minute, (20, protobuf(*body)), status)
+
+    @classmethod
+    def result(cls, name: str, text: str, minute: int) -> tuple[int, int, bytes]:
+        return cls.step(132, minute, (140, protobuf((2, protobuf((1, text))))), tool=name)
+
+
 def git_repo(path: Path, origin: str | None) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q", str(path)], check=True)
@@ -385,7 +508,7 @@ def git_repo(path: Path, origin: str | None) -> Path:
 
 class HistCase(unittest.TestCase):
     """A scratch machine: two Codex accounts, one root each for Claude Code,
-    Command Code, OpenCode, and Devin, and a hist home."""
+    Command Code, OpenCode, Devin, and Antigravity, and a hist home."""
 
     maxDiff = None
 
@@ -399,6 +522,7 @@ class HistCase(unittest.TestCase):
         self.commandcode = self.base / ".commandcode" / "projects"
         self.opencode = self.base / ".local" / "share" / "opencode"
         self.devin = self.base / ".local" / "share" / "devin" / "cli"
+        self.antigravity = self.base / ".gemini" / "antigravity-cli"
         for path in (self.codex, self.codex_state, self.codex2, self.claude, self.commandcode):
             path.mkdir(parents=True)
         self.home = self.base / "hist-home"
@@ -442,6 +566,11 @@ roots = ["{self.opencode}"]
 adapter = "devin"
 label = "devin"
 roots = ["{self.devin}"]
+
+[[sources]]
+adapter = "antigravity"
+label = "antigravity"
+roots = ["{self.antigravity}"]
 
 [view]
 inject = {inject}

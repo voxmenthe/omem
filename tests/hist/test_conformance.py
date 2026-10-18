@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from tests.hist.fixtures import (
-    Claude, Codex, CommandCode, Devin, HistCase, OpenCode, write_jsonl,
+    Antigravity, Claude, Codex, CommandCode, Devin, HistCase, OpenCode, protobuf, write_jsonl,
 )
 
 BIG = "y" * 4000
@@ -298,6 +298,53 @@ class DevinConformance(Conformance):
 
     def broken(self, number: int, minute: int) -> dict[str, Any]:
         return {**self.host.user("x", minute), "content": ["not", "text"]}
+
+
+class AntigravityConformance(Conformance):
+    label = "antigravity"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.host = Antigravity(self.antigravity)
+        self.addCleanup(self.host.close)
+
+    def native(self, number: int) -> str:
+        return f"a9000000-0000-4000-8000-00000000c{number:03d}"
+
+    def write(self, number: int, records: list[Any], fresh: bool = True) -> tuple[str, Path]:
+        native = self.native(number)
+        if fresh:
+            self.host.conversation(native, str(self.repo), self.origin)
+            self.host.typed(native, "a prompt")
+        self.host.add(native, records)
+        return native[-8:], self.host.path(native)
+
+    def user(self, number: int, text: str, minute: int) -> Any:
+        return Antigravity.user(text, minute)
+
+    def reply(self, number: int, text: str, minute: int) -> Any:
+        return Antigravity.reply(text, minute)
+
+    def injected(self, number: int, minute: int) -> list[Any]:
+        return [
+            Antigravity.step(101, minute, (114, protobuf((1, "INJECTED system message")))),
+            Antigravity.step(90, minute, (103, protobuf((1, "INJECTED ephemeral message")))),
+            Antigravity.step(98, minute, (111, protobuf((1, "INJECTED conversation history")))),
+            Antigravity.reply("", minute, thinking="INJECTED thinking"),
+        ]
+
+    def unknown(self, number: int, minute: int) -> Any:
+        return Antigravity.step(8, minute, (14, protobuf((1, "UNKNOWN-TEXT"))))
+
+    def broken(self, number: int, minute: int) -> Any:
+        return 14, Antigravity.DONE, b"\x0f\x00"
+
+    def test_a_lone_surrogate_is_stored_as_a_replacement_character(self) -> None:
+        # Protobuf strings are bytes: an encoded lone surrogate is invalid
+        # UTF-8, and each of its bytes becomes a replacement character.
+        self.write(1, [self.user(1, "cut \ud83d here", 1), self.reply(1, "answer", 2)])
+        self.hist("sync")
+        self.assertEqual([text for _, text in self.texts()], ["cut \ufffd\ufffd\ufffd here", "answer"])
 
 
 del Conformance

@@ -218,9 +218,10 @@ def count_unknown(state: dict[str, Any], what: str) -> None:
 
 
 def adapter(name: str) -> Adapter:
-    from . import claude, codex, commandcode, devin, opencode
+    from . import antigravity, claude, codex, commandcode, devin, opencode
 
     adapters: dict[str, Adapter] = {
+        "antigravity": antigravity.ADAPTER,
         "codex": codex.ADAPTER,
         "claude": claude.ADAPTER,
         "commandcode": commandcode.ADAPTER,
