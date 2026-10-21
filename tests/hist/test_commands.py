@@ -1,5 +1,6 @@
 """Every paged command stays within its limit and continues exactly (invariant 5)."""
 
+import json
 import re
 import shlex
 import sqlite3
@@ -10,6 +11,7 @@ from tests.hist.fixtures import Claude, Codex, HistCase, git_repo, write_jsonl
 
 SESSIONS = 55
 LONG = 300
+ROUNDS = 20
 CONTINUATION = re.compile(r"(?:more|next): hist (.+)$")
 
 
@@ -88,6 +90,33 @@ class PagingTest(HistCase):
         self.assertEqual(users, list(range(LONG)))
         self.assertEqual(len(lines), LONG + 2)
 
+    def test_read_kind_pages_keep_the_filter_without_gap_or_repeat(self) -> None:
+        pages = self.walk("read", thread(999)[-8:], "--kind", "user", limit=READ_BYTES)
+        self.assertGreater(len(pages), 2)
+        lines = [line for page in pages for line in page]
+        users = [int(m.group(1)) for line in lines if (m := re.search(r"\] user: long session line (\d+) ", line))]
+        self.assertEqual(users, list(range(LONG)))
+        self.assertEqual(len(lines), LONG)
+
+    def test_read_tail_ends_with_the_newest_and_says_how_to_read_the_rest(self) -> None:
+        alias = thread(999)[-8:]
+        last = self.hist("read", alias, "--tail", "3").stdout.splitlines()
+        self.assertEqual(len(last), 3)
+        self.assertIn("] user: long session line 298 ", last[0])
+        self.assertIn("] user: long session line 299 ", last[1])
+        self.assertIn("] agent: 00000é€😀", last[2])
+        lines = self.hist("read", alias, "--tail", "200", "--kind", "user").stdout.splitlines()
+        earlier = re.fullmatch(r"earlier: (\d+) of the last 200 did not fit; hist (read .+ --kind user)", lines[0])
+        self.assertIsNotNone(earlier, lines[0])
+        self.assertLessEqual(len("\n".join(lines[1:]).encode()), READ_BYTES)
+        left = int(earlier.group(1))
+        users = [int(re.search(r"\] user: long session line (\d+) ", line).group(1)) for line in lines[1:]]
+        self.assertEqual(users, list(range(LONG - 200 + left, LONG)))
+        pages = self.walk(*shlex.split(earlier.group(2)), limit=READ_BYTES)
+        replayed = [int(re.search(r"\] user: long session line (\d+) ", line).group(1))
+                    for page in pages for line in page]
+        self.assertEqual(replayed, list(range(LONG - 200, LONG)))
+
     def test_timelines_pages_list_each_timeline_once(self) -> None:
         pages = self.walk("timelines", limit=LIST_BYTES * 2)
         names = [line.split()[0] for page in pages for line in page]
@@ -101,6 +130,68 @@ class PagingTest(HistCase):
         self.assertGreater(len(pages), 2)
         text = "".join("\n".join(page[1:]) for page in pages)
         self.assertEqual(text, self.big)
+
+
+class ReadTest(HistCase):
+    """`read --tail` and `--kind` over a worker whose answers sit between tool rows."""
+
+    walk = PagingTest.walk
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.hist("status")
+        native = thread(3000)
+        records = [Codex.meta(native, str(self.repo), "exec", self.origin), Codex.user("audit the guard", 1)]
+        for n in range(ROUNDS):
+            records += [
+                Codex.call("exec_command", json.dumps({"cmd": f"check {n}"}), f"c{n}", 2),
+                Codex.output(f"c{n}", f"output {n}", 2),
+                Codex.assistant(f"answer {n} " + "y" * 600, 3),
+            ]
+        write_jsonl(Codex.path(self.codex, native), records)
+        self.hist("sync")
+        self.alias = native[-8:]
+
+    def answers(self, lines: list[str]) -> list[int]:
+        return [int(re.search(r"\] agent: answer (\d+) ", line).group(1)) for line in lines]
+
+    def test_tail_and_kind_select_the_last_answers_skipping_tool_rows(self) -> None:
+        lines = self.hist("read", self.alias, "--tail", "3", "--kind", "agent").stdout.splitlines()
+        self.assertEqual(self.answers(lines), [ROUNDS - 3, ROUNDS - 2, ROUNDS - 1])
+        pages = self.walk("read", self.alias, "--kind", "user,agent", limit=READ_BYTES)
+        self.assertGreater(len(pages), 1)
+        lines = [line for page in pages for line in page]
+        self.assertIn("] user: audit the guard", lines[0])
+        self.assertEqual(self.answers(lines[1:]), list(range(ROUNDS)))
+
+    def test_a_tail_from_the_timeline_start_reads_the_rest_from_the_start(self) -> None:
+        lines = self.hist("read", self.alias, "--tail", "1000").stdout.splitlines()
+        total = 2 + 3 * ROUNDS
+        earlier = re.fullmatch(rf"earlier: (\d+) of the last {total} did not fit; hist (read {self.alias})",
+                               lines[0])
+        self.assertIsNotNone(earlier, lines[0])
+        self.assertIn(f"] agent: answer {ROUNDS - 1} ", lines[-1])
+        pages = self.walk(*shlex.split(earlier.group(2)), limit=READ_BYTES)
+        replayed = [line for page in pages for line in page]
+        self.assertEqual(len(replayed), total)
+        self.assertEqual(replayed[-(len(lines) - 1):], lines[1:])
+        self.assertIn("event: session", replayed[0])
+
+    def test_empty_selections_and_flag_misuse(self) -> None:
+        for args in (("--tail", "3", "--kind", "work"), ("--kind", "work")):
+            with self.subTest(args=args):
+                self.assertEqual(self.hist("read", self.alias, *args).stdout, "no messages\n")
+        for args, error in (
+            (("--tail", "3", "--after", f"w-{self.alias}:1"), "give --after or --tail, not both"),
+            (("--tail", "0"), "--tail takes a positive number"),
+            (("--tail", "-2"), "--tail takes a positive number"),
+            (("--tail", "two"), "invalid int value"),
+            (("--kind", "agent,thought"), "--kind 'thought' is not one of"),
+        ):
+            with self.subTest(args=args):
+                result = self.hist("read", self.alias, *args, check=False)
+                self.assertEqual((result.returncode, result.stdout), (2, ""))
+                self.assertIn(error, result.stderr)
 
 
 class DigestTest(HistCase):

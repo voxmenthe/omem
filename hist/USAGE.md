@@ -14,7 +14,7 @@ Every line `hist` prints starts with a reference you can open:
 |---|---|---|
 | `myrepo:9600+16` | 16 messages of timeline `myrepo`, from message 9600 | `hist zoom myrepo:9600+16` splits it into finer lines (`--depth K` gives 2^K) |
 | `myrepo:9627` | one message | `hist zoom myrepo:9627` prints it whole, in 8 KB pages (`--page P`) |
-| `s:149ae25c` | a session, in message headers | `hist read 149ae25c` replays it in order; `hist read self` replays your own |
+| `s:149ae25c` | a session, in message headers | `hist read 149ae25c` replays it in order, `--tail N` its last N messages; `hist read self` replays your own |
 | `w-934fad40` | a worker's or subagent's own timeline | `hist view w-934fad40` |
 
 A timeline is one repository's history across every host and account, oldest
@@ -105,9 +105,14 @@ A worker's final report is its own account of the work; its transcript is the
 evidence:
 
 ```bash
-hist sessions --workers     # workers and subagents started from this repository's sessions
-hist read 934fad40          # one worker's messages, in order
+hist sessions --workers                  # workers and subagents started from this repository's sessions
+hist read 934fad40                       # one worker's messages, in order
+hist read 934fad40 --tail 20             # its last steps, tool calls and results included
+hist read 934fad40 --tail 1 --kind agent # its final answer
 ```
+
+`read` clips each message to one line; to print the final answer whole, pass
+`hist zoom` its reference without the `+1`.
 
 Codex workers and Claude Code subagents are linked to their parents
 automatically. A Claude Code worker started from a Claude Code shell is linked
@@ -119,13 +124,19 @@ that started it, and Kimi sessions are not recorded.
 ### Audit or replay a session
 
 ```bash
-hist sessions myrepo        # sessions, newest first, each with its first reference
-hist read 149ae25c          # replay one; follow the `more:` line to continue
+hist sessions myrepo                            # sessions, newest first, each with its first reference
+hist read 149ae25c                              # replay one; follow the `more:` line to continue
+hist read 149ae25c --tail 10 --kind user,agent  # how it ended: the last ten turns
 ```
 
 Each session line shows its first telling prompt, skipping ones such as
 "continue" or a pasted traceback, with slash commands shown as `/name args`,
 then its last agent message.
+
+`--kind` takes the names `find --kind` takes, with or without `--tail`, and a
+`more:` line keeps it. When the messages `--tail` selects overflow a page, the
+newest win, and a first line starting `earlier:` holds the command that reads
+the rest.
 
 Use this to review what an unattended agent did, or to write up a session's
 decisions afterwards.

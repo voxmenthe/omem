@@ -33,7 +33,8 @@ USAGE = """hist: every agent session on this machine, indexed and navigable by r
       [--session S|self] [--kind K,...]   filters; your own session is left out unless
       [--since T] [--until T]             --include-self (times UTC); `hist find -h` explains
   hist sessions [TIMELINE] [--workers]    sessions, newest first, with their first reference
-  hist read SESSION|self [--after REF]    one session's messages in order
+  hist read SESSION|self [--after REF]    one session's messages in order; --tail N reads
+      [--tail N] [--kind K,...]           its last N (a worker's answer: --tail 1 --kind agent)
   hist timelines                          timelines by last activity
   hist status                             sources, freshness, alarms, disk
   hist sync [--all]                       index new records (reads do this automatically)
@@ -92,6 +93,8 @@ def _parser() -> argparse.ArgumentParser:
     read = sub.add_parser("read", help="one session's messages in order")
     read.add_argument("session", help="session alias, or self for your own")
     read.add_argument("--after", help="start after this reference")
+    read.add_argument("--tail", type=int, help="only the last N messages, oldest first; newest kept if they overflow")
+    read.add_argument("--kind", help="comma-separated: user, agent, tool, result, work, event")
     timelines = sub.add_parser("timelines", help="timelines by last activity")
     timelines.add_argument("--after", help="continuation cursor, as printed after more:")
     sub.add_parser("status", help="sources, freshness, alarms, disk")
@@ -188,7 +191,7 @@ def _read(args: argparse.Namespace, store: Store, config: Config, cwd: Path) -> 
             return commands.sessions(db, timeline, args.workers, args.after)
         if args.command == "read":
             name = commands.self_alias(db, caller) if args.session == "self" else args.session
-            return commands.read(db, name, args.after, cwd)
+            return commands.read(db, name, args.after, cwd, tail=args.tail, kinds=args.kind)
         if args.command == "timelines":
             return commands.timelines(db, args.after)
     raise AssertionError(args.command)

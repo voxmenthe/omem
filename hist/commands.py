@@ -319,6 +319,21 @@ def self_alias(db: sqlite3.Connection, caller: Caller | None) -> str:
     return found[1]
 
 
+def _kinds(kinds: str | None) -> tuple[str, ...]:
+    """The stored kinds a comma-separated `--kind` names, in order, once each."""
+
+    wanted: list[str] = []
+    for name in (kinds or "").split(","):
+        name = name.strip()
+        if not name:
+            continue
+        if name not in _KINDS:
+            raise UsageError(f"--kind {name!r} is not one of {', '.join(sorted(_KINDS))}")
+        if _KINDS[name] not in wanted:
+            wanted.append(_KINDS[name])
+    return tuple(wanted)
+
+
 def find_filters(
     db: sqlite3.Connection,
     *,
@@ -348,15 +363,7 @@ def find_filters(
             f"(left out this session, s:{found[1]}, and the sessions it started; "
             "--include-self searches them too, --session self searches only them)"
         )
-    wanted: list[str] = []
-    for name in (kinds or "").split(","):
-        name = name.strip()
-        if not name:
-            continue
-        if name not in _KINDS:
-            raise UsageError(f"--kind {name!r} is not one of {', '.join(sorted(_KINDS))}")
-        if _KINDS[name] not in wanted:
-            wanted.append(_KINDS[name])
+    wanted = _kinds(kinds)
     if wanted:
         flags.append(f"--kind {','.join(wanted)}")
     start = None if since is None else _utc(since, "--since")
@@ -365,7 +372,7 @@ def find_filters(
         flags.append(f"--since {start}")
     if end is not None:
         flags.append(f"--until {end}")
-    return Filters(sessions, exclude, tuple(wanted), start, end, "".join(f" {f}" for f in flags), note)
+    return Filters(sessions, exclude, wanted, start, end, "".join(f" {f}" for f in flags), note)
 
 
 def _header(hits: int, scanned: bool, more: str | None) -> str:
@@ -593,11 +600,59 @@ def session_named(db: sqlite3.Connection, name: str) -> tuple[object, ...]:
     return rows[0]
 
 
-def read(db: sqlite3.Connection, name: str, after: str | None, cwd: Path) -> str:
+def read(
+    db: sqlite3.Connection, name: str, after: str | None, cwd: Path,
+    tail: int | None = None, kinds: str | None = None,
+) -> str:
+    """One session's messages, oldest first, of `kinds` only when given:
+    from its start, after `after`, or its last `tail`. A tail that overflows
+    the page keeps its newest messages and says how to read the rest."""
+
+    if tail is not None and after is not None:
+        raise UsageError("give --after or --tail, not both")
+    if tail is not None and tail < 1:
+        raise UsageError("--tail takes a positive number of messages")
+    wanted = _kinds(kinds)
+    kept = f" AND m.kind IN ({', '.join('?' * len(wanted))})" if wanted else ""
+    flags = f" --kind {','.join(wanted)}" if wanted else ""
     session_id, alias, timeline_id = session_named(db, name)
     timeline = _timeline(
         db, db.execute(f"SELECT {_TIMELINE_COLUMNS} FROM timelines WHERE id = ?", (timeline_id,)).fetchone()
     )
+    session_label = db.execute("SELECT label FROM sessions WHERE id = ?", (session_id,)).fetchone()[0]
+
+    def line(position: int, kind: str, tool: str | None, text: str) -> str:
+        return f"{timeline.ref_name}:{position}+1|" + clip_line(
+            message_line(str(alias), session_label, kind, tool, text)
+        ) + "\n"
+
+    if tail is not None:
+        count, first = db.execute(
+            "SELECT count(*), min(position) FROM (SELECT m.position FROM messages m "
+            f"WHERE m.session_id = ?{kept} ORDER BY m.position DESC LIMIT ?)",
+            (session_id, *wanted, tail),
+        ).fetchone()
+        if not count:
+            return "no messages\n"
+        newest: list[str] = []
+        used = 0
+        for row in db.execute(
+            "SELECT m.position, m.kind, m.tool, m.text FROM messages m WHERE m.session_id = ? "
+            f"AND m.position >= ?{kept} ORDER BY m.position DESC LIMIT 400",
+            (session_id, first, *wanted),
+        ):
+            entry = line(*row)
+            if used + len(entry.encode()) > READ_BYTES and newest:
+                break
+            newest.append(entry)
+            used += len(entry.encode())
+        if len(newest) < count:
+            since = f" --after {timeline.ref_name}:{first - 1}" if first else ""
+            newest.append(
+                f"earlier: {count - len(newest)} of the last {count} did not fit; "
+                f"hist read {alias}{since}{flags}\n"
+            )
+        return "".join(reversed(newest))
     start = -1
     if after is not None:
         ref_timeline, position, _ = parse_ref(db, after, cwd)
@@ -606,25 +661,22 @@ def read(db: sqlite3.Connection, name: str, after: str | None, cwd: Path) -> str
         start = position
     rows = db.execute(
         "SELECT m.position, m.kind, m.tool, m.text FROM messages m WHERE m.session_id = ? "
-        "AND m.position > ? ORDER BY m.position LIMIT 400",
-        (session_id, start),
+        f"AND m.position > ?{kept} ORDER BY m.position LIMIT 400",
+        (session_id, start, *wanted),
     ).fetchall()
-    session_label = db.execute("SELECT label FROM sessions WHERE id = ?", (session_id,)).fetchone()[0]
     out: list[str] = []
     used = 0
     last = start
-    for position, kind, tool, text in rows:
-        line = f"{timeline.ref_name}:{position}+1|" + clip_line(
-            message_line(str(alias), session_label, kind, tool, text)
-        ) + "\n"
-        if used + len(line.encode()) > READ_BYTES and out:
-            out.append(f"more: hist read {alias} --after {timeline.ref_name}:{last}\n")
+    for row in rows:
+        entry = line(*row)
+        if used + len(entry.encode()) > READ_BYTES and out:
+            out.append(f"more: hist read {alias} --after {timeline.ref_name}:{last}{flags}\n")
             return "".join(out)
-        out.append(line)
-        used += len(line.encode())
-        last = position
+        out.append(entry)
+        used += len(entry.encode())
+        last = row[0]
     if len(rows) == 400:
-        out.append(f"more: hist read {alias} --after {timeline.ref_name}:{rows[-1][0]}\n")
+        out.append(f"more: hist read {alias} --after {timeline.ref_name}:{rows[-1][0]}{flags}\n")
     if not out:
         out.append("no messages\n")
     return "".join(out)

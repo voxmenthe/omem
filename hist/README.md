@@ -31,8 +31,9 @@ existing index without syncing. `hist` with no arguments lists the commands.
 - Search everything: `hist find "<error text>" --all`.
 - Pass a worker references such as `myrepo:12345` instead of pasted context.
 - Read a worker's transcript, not just its report: `hist sessions --workers`,
-  then `hist read <alias>`.
-- Replay any session in order with `hist read`.
+  then `hist read <alias> --tail 20` for its last steps.
+- Replay any session in order with `hist read`, or read its end with
+  `--tail N`; `--kind user,agent` keeps only the conversation.
 - Widen `view.inject` as the view proves useful, and summarize only small
   timelines.
 
