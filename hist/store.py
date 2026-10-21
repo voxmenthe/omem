@@ -6,6 +6,7 @@ transaction is short: parsing and summarizer calls happen outside them.
 """
 
 import os
+import re
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -16,6 +17,11 @@ SCHEMA_VERSION = 1
 DATABASE_NAME = "hist.db"
 WRITE_WAIT_MS = 200
 READ_RETRY_SECONDS = 1.0
+_JSON_ESCAPE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|(.))", re.DOTALL)
+_UNESCAPED = {"n": "\n", "t": "\t", "r": "\r", "b": " ", "f": " "}
+# Codex `exec` output: a few header lines, then its result as one JSON object.
+_SCRIPT_HEADER = "Script "
+_SCRIPT_JSON = re.compile(r"\n[{\[]")
 
 _SCHEMA = """
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -275,6 +281,44 @@ class Store:
         if row is None:
             raise StoreError(f"store is missing meta {key!r}")
         return row[0]
+
+
+def _json_start(text: str) -> int | None:
+    body = len(text) - len(text.lstrip())
+    if text[body : body + 1] in ("{", "["):
+        return body
+    if text.startswith(_SCRIPT_HEADER):
+        found = _SCRIPT_JSON.search(text, 0, 400)
+        return None if found is None else found.start() + 1
+    return None
+
+
+def _unescape(match: re.Match[str]) -> str:
+    if match.group(1) is not None:
+        code = int(match.group(1), 16)
+        return " " if code < 0x20 or 0xD800 <= code <= 0xDFFF else chr(code)
+    return _UNESCAPED.get(match.group(2), match.group(2))
+
+
+def search_text(text: str) -> str:
+    """Text as the search index and `find` see it.
+
+    Inside JSON every backslash starts an escape, so tool calls and JSON
+    tool output would index `\\nTraceback` as the word `nTraceback`. Their
+    escapes are decoded here; any other text, where a backslash may be
+    literal (LaTeX, paths), is searched as stored. Stored text never changes.
+    """
+
+    if "\\" not in text:
+        return text
+    start = _json_start(text)
+    if start is None:
+        return text
+    return text[:start] + _JSON_ESCAPE.sub(_unescape, text[start:])
+
+
+def index_message(db: sqlite3.Connection, message_id: int, text: str) -> None:
+    db.execute("INSERT INTO search (rowid, text) VALUES (?, ?)", (message_id, search_text(text)))
 
 
 def database_bytes(home: Path) -> int:

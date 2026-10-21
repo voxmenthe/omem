@@ -63,8 +63,10 @@ hist find "UnicodeEncodeError: surrogates" --all   # every timeline
 ```
 
 Search is literal and word-anchored, not semantic, so use a distinctive phrase:
-an error message, file name, or identifier. Each hit is the matching message's
-line, followed by the view line it falls in. Across 2.76 million messages here,
+an error message, file name, or identifier. Tool output that a host stored as
+JSON is searched with its escapes decoded, so `Traceback` finds a traceback
+that follows an escaped `\n`. Each hit is the matching message's line,
+followed by the view line it falls in. Across 2.76 million messages here,
 `--all` took about 0.7 s. When an error looks familiar, search for it before
 debugging from scratch.
 

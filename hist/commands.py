@@ -11,7 +11,7 @@ from pathlib import Path
 from .config import Config
 from .registry import lookup_directory
 from .render import Renderer, Timeline, clip_line, flat, kind_label, message_line, span
-from .store import database_bytes
+from .store import database_bytes, search_text
 from .tree import LINE_BYTES, ViewBudgetError, compute_view, node_at
 
 PAGE_BYTES = 8 * 1024
@@ -273,7 +273,8 @@ def find(
     last_id = None
     for message_id, timeline_id, position, body, alias, label, kind, tool in candidates:
         last_id = message_id
-        match = pattern.search(body)
+        shown = search_text(body)
+        match = pattern.search(shown)
         if match is None:
             continue
         if timeline_id not in timelines:
@@ -282,11 +283,8 @@ def find(
             ).fetchone()
             timelines[timeline_id] = _timeline(db, row)
         found_in = timelines[timeline_id]
-        before = flat(body[max(0, match.start() - 80) : match.start()])
-        after_text = flat(body[match.start() : match.start() + 160])
-        snippet = clip_line(
-            f"[s:{alias} {label}] {kind_label(kind, tool)}: …{before} {after_text}…", LINE_BYTES
-        )
+        window = flat(shown[max(0, match.start() - 80) : match.start() + 160])
+        snippet = clip_line(f"[s:{alias} {label}] {kind_label(kind, tool)}: …{window}…", LINE_BYTES)
         entry = f"{found_in.ref_name}:{position}+1|{snippet}\n"
         level = 5
         while level > 0 and ((position >> level) + 1 << level) > found_in.length:

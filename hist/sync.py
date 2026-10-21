@@ -37,7 +37,7 @@ from .registry import (
     session_for,
 )
 from .scan import CachedListing
-from .store import Store, StoreBusy, utc_now
+from .store import Store, StoreBusy, index_message, utc_now
 
 LOCK_NAME = "sync.lock"
 LOCK_WAIT_SECONDS = 0.2
@@ -410,7 +410,7 @@ def _commit(store: Store, group: list[_Live], report: Report) -> int:
                 (timeline, length, live.row, message.record, message.part, live.session,
                  message.kind, message.tool, message.time, text, message.key),
             )
-            db.execute("INSERT INTO search (rowid, text) VALUES (?, ?)", (cursor.lastrowid, text))
+            index_message(db, cursor.lastrowid, text)
             stats = sessions.setdefault(live.session, [length, length, message.time, message.time, 0])
             stats[1] = length
             stats[2] = min(stats[2], message.time)
@@ -565,7 +565,7 @@ def _resolve_links(store: Store) -> None:
                 "session_id, kind, tool, time, text) VALUES (?, ?, ?, -2, 0, ?, 'event', ?, ?, ?)",
                 (parent_timeline, length, source[0], parent_id, via, now, text),
             )
-            db.execute("INSERT INTO search (rowid, text) VALUES (?, ?)", (inserted.lastrowid, text))
+            index_message(db, inserted.lastrowid, text)
             db.execute(
                 "UPDATE timelines SET length = length + 1, last_time = max(coalesce(last_time, ?), ?) "
                 "WHERE id = ?",
