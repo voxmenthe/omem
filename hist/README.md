@@ -307,6 +307,8 @@ as Codex's `read-only` or `workspace-write` modes.
 ```bash
 uv run python -m unittest discover -s tests/hist -t .
 uv run python benchmarks/hist_hook_latency.py          # hook p95 on a million-message timeline
+uv run python scripts/hist_rates.py                    # weekly rates of how agents use hist
+uv run python scripts/hist_replay.py                   # replay past finds and zooms: regressions, latency
 ```
 
 Tests drive the `hist` command against fixture transcripts shaped like real
