@@ -7,10 +7,10 @@ the explicitly selected files; do not scan session archives.
 1. Run `memory init`, `memory wake`, and any focused `memory recall` needed to
    compare candidates with current integrated memory and repository evidence.
 2. Give priority to explicit corrections to an agent's initially chosen course,
-   failed steps followed by a different step that worked, and preferences
-   expressed repeatedly across the selected sessions. A single explicit
-   correction may qualify when it is plausibly reusable; repetition strengthens
-   confidence but is not required.
+   failed steps followed by a different step that worked, and
+   preferences expressed repeatedly across the selected sessions. A single
+   explicit correction may qualify when it is plausibly reusable; repetition
+   strengthens confidence but is not required.
 3. Also inspect for durable invariants, reusable procedures, and compact
    cross-source syntheses or retrieval pointers that materially reduce future
    discovery cost. Propose a procedure only where the session shows that
