@@ -71,7 +71,7 @@ def short_date(stamp: str) -> str:
 
 def span(first: str, last: str) -> str:
     if first[:10] == last[:10]:
-        return f"{short_date(first)} {first[11:16]}–{last[11:16]}"
+        return f"{short_date(first)} {first[11:16]}–{last[11:16]}Z"
     return f"{short_date(first)} – {short_date(last)}"
 
 

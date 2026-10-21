@@ -14,7 +14,7 @@ Every line `hist` prints starts with a reference you can open:
 |---|---|---|
 | `myrepo:9600+16` | 16 messages of timeline `myrepo`, from message 9600 | `hist zoom myrepo:9600+16` splits it into finer lines (`--depth K` gives 2^K) |
 | `myrepo:9627` | one message | `hist zoom myrepo:9627` prints it whole, in 8 KB pages (`--page P`) |
-| `s:149ae25c` | a session, in message headers | `hist read 149ae25c` replays it in order |
+| `s:149ae25c` | a session, in message headers | `hist read 149ae25c` replays it in order; `hist read self` replays your own |
 | `w-934fad40` | a worker's or subagent's own timeline | `hist view w-934fad40` |
 
 A timeline is one repository's history across every host and account, oldest
@@ -22,7 +22,8 @@ first. Workers and subagents get their own `w-` timelines, linked to the session
 that started them. Lines marked `~` are outlines, a preview of the messages'
 first words; unmarked lines are summaries. Both are lossy, so zoom before
 relying on one. A command that stops early prints a `more:` line holding the
-command that continues it.
+command that continues it; `find` also prints it on its first line, so a pipe
+through `head` keeps it. Printed times are UTC and end in `Z`.
 
 ## Ways to use
 
@@ -60,15 +61,33 @@ long session lost to compaction.
 ```bash
 hist find "connection refused"                  # this repository
 hist find "UnicodeEncodeError: surrogates" --all   # every timeline
+hist find "retry budget" --kind user,agent --since 2026-10-01
+hist find "port" --session self                 # only your own session and its subagents
 ```
 
 Search is literal and word-anchored, not semantic, so use a distinctive phrase:
 an error message, file name, or identifier. Tool output that a host stored as
 JSON is searched with its escapes decoded, so `Traceback` finds a traceback
-that follows an escaped `\n`. Each hit is the matching message's line,
-followed by the view line it falls in. Across 2.76 million messages here,
-`--all` took about 0.7 s. When an error looks familiar, search for it before
-debugging from scratch.
+that follows an escaped `\n`. The first line counts the hits; each hit is the
+matching message's line, followed by the view line it falls in. The filters
+narrow the search itself rather than the printed page, so prefer them to
+piping through `grep`:
+
+| Filter | Keeps |
+|---|---|
+| `--session ALIAS` | that session and the sessions it started, in any timeline; `self` names your own |
+| `--kind K,...` | `user`, `agent`, `tool`, `result`, `work` or `event` messages |
+| `--since T`, `--until T` | messages at or after `T`, or before it; UTC unless `T` gives an offset |
+
+`find` leaves out the session that runs it, and the sessions that session
+started, because they mostly find the search itself; a note on the second
+line says so. `--include-self` searches them too, and `--session self` searches
+only them, as after compaction cost you a detail. A person at a terminal gets
+everything. A Claude Code subagent counts as its parent's session.
+
+Most searches take tens of milliseconds; a phrase ending in a one- or
+two-letter word, such as `"cam -p"`, can take seconds. When an error looks
+familiar, search for it before debugging from scratch.
 
 ### Delegate by reference
 

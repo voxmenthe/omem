@@ -57,7 +57,15 @@ class PagingTest(HistCase):
     def test_find_pages_cover_every_hit_once_newest_first(self) -> None:
         pages = self.walk("find", "needle", limit=LIST_BYTES)
         self.assertGreater(len(pages), 1)
-        hits = [line for page in pages for line in page if not line.startswith("  in ")]
+        for n, page in enumerate(pages):
+            # The first line counts the page's hits and, but on the last page,
+            # repeats the continuation, so `| head` cannot cut it off.
+            header = re.fullmatch(r"(\d+) hits?, newest first(; more: hist .+)?", page[0])
+            self.assertIsNotNone(header, page[0])
+            entries = [line for line in page[1:] if not line.startswith("  in ")]
+            self.assertEqual(int(header.group(1)), len(entries))
+            self.assertEqual(header.group(2) is not None, n < len(pages) - 1)
+        hits = [line for page in pages for line in page[1:] if not line.startswith("  in ")]
         sessions = [int(re.search(r"session (\d+) asks", line).group(1)) for line in hits]
         self.assertEqual(sorted(sessions), list(range(SESSIONS)))
         positions = [int(line.split("|")[0].split(":")[1].split("+")[0]) for line in hits]

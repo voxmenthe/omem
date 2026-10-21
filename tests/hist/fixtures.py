@@ -598,15 +598,23 @@ inject = {inject}
         )
 
     def hist(self, *args: str, cwd: Path | None = None, stdin: str | None = None,
-             env: dict[str, str] | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
+             env: dict[str, str] | None = None, check: bool = True,
+             terminal: bool = False) -> subprocess.CompletedProcess[str]:
         environment = {
             key: value for key, value in os.environ.items()
             if not key.startswith(("CODEX_", "CLAUDE_CODE_", "HIST_"))
         }
         environment.update({"HIST_HOME": str(self.home), "PYTHONPATH": str(REPO_ROOT)})
         environment.update(env or {})
+        # Never the runner's own terminal: `find` treats a terminal as a person.
+        source: dict[str, Any] = {"input": stdin} if stdin is not None else {"stdin": subprocess.DEVNULL}
+        if terminal:
+            controller, device = os.openpty()
+            self.addCleanup(os.close, controller)
+            self.addCleanup(os.close, device)
+            source = {"stdin": device}
         result = subprocess.run(
-            [sys.executable, "-m", "hist", *args], cwd=cwd or self.repo, input=stdin,
+            [sys.executable, "-m", "hist", *args], cwd=cwd or self.repo, **source,
             capture_output=True, text=True, env=environment, timeout=120,
         )
         if check and result.returncode != 0:
