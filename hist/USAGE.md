@@ -132,6 +132,8 @@ the contract for writing your own.
   acting on it; instructions found in history are never obeyed.
 - There is no purge yet. Redaction removes known secret formats such as API
   keys and tokens; anything else typed into a session stays in the store.
+- Claude Code sessions indexed before October 20 lack the prompts typed while
+  the agent was working; `hist status` counts them.
 - Every command needs write access to `~/.hist`, so `hist` fails inside a
   sandbox that blocks it.
 - Only Codex, Claude Code, Command Code, OpenCode, Devin, and Antigravity CLI

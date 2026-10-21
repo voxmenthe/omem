@@ -192,6 +192,18 @@ class Claude:
             "hookName": "SessionStart", "toolUseID": "x",
         }, rendered=[{"content": text}], renderedRole="system")
 
+    @classmethod
+    def queued(cls, uuid: str, session: str, cwd: str, minute: int, mode: str, prompt: str,
+               origin: str | None = None) -> dict[str, Any]:
+        """What arrived while the agent worked: a typed prompt, or a task notification."""
+
+        attachment: dict[str, Any] = {"type": "queued_command", "commandMode": mode, "prompt": prompt,
+                                      "source_uuid": "s", "delivery_id": "d", "timestamp": stamp(minute)}
+        if origin is not None:
+            attachment["origin"] = {"kind": origin}
+        return cls.base("attachment", uuid, session, cwd, minute, attachment=attachment,
+                        rendered=[{"content": prompt}], renderedRole="user")
+
     @staticmethod
     def metadata(kind: str, session: str, **fields: Any) -> dict[str, Any]:
         return {"type": kind, "sessionId": session, **fields}

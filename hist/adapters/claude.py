@@ -4,7 +4,9 @@
 agent-<id>.jsonl` is one of its subagents. Forks copy records into a new
 file under the same `uuid`s and a few files re-append earlier blocks, so a
 record's `uuid` is its key across files and the first occurrence wins.
-Hook context is recorded only as `attachment` records, which are dropped.
+`attachment` records, which also carry hook context, are dropped, except
+queued commands: what the user typed while the agent worked, and task
+notifications that arrived then.
 """
 
 import json
@@ -56,7 +58,6 @@ _METADATA = frozenset(
         "result",
         "launched",
         "progress",
-        "attachment",
     }
 )
 # Leading markers of user-role strings: dropped as injected, or re-kinded.
@@ -241,6 +242,24 @@ def _user(value: dict[str, Any], state: dict[str, Any]) -> list[tuple[str, str |
     return out
 
 
+def _attachment(value: dict[str, Any], state: dict[str, Any]) -> list[tuple[str, str | None, str]]:
+    attachment = value.get("attachment")
+    if not isinstance(attachment, dict) or attachment.get("type") != "queued_command":
+        return []
+    mode, prompt = attachment.get("commandMode"), attachment.get("prompt")
+    origin = attachment.get("origin")
+    if not isinstance(prompt, str) or mode not in ("prompt", "task-notification"):
+        count_unknown(state, f"queued_command:{mode}")
+        return []
+    if mode == "task-notification":
+        return [("work", "task", prompt)]
+    # A prompt another session sent, not one the user typed.
+    if isinstance(origin, dict) and origin.get("kind") == "peer":
+        return [("work", "peer", prompt)]
+    found = _user_text(prompt)
+    return [] if found is None else [(found[0], found[1], prompt)]
+
+
 def _assistant(value: dict[str, Any], state: dict[str, Any]) -> list[tuple[str, str | None, str]]:
     message = value.get("message")
     if not isinstance(message, dict):
@@ -297,6 +316,8 @@ def map_records(
             found = _user(value, state)
         elif record_type == "assistant":
             found = _assistant(value, state)
+        elif record_type == "attachment":
+            found = _attachment(value, state)
         elif record_type == "system":
             if value.get("subtype") == "compact_boundary":
                 found = [("event", None, "context compacted")]

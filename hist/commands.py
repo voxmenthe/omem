@@ -534,6 +534,12 @@ def status(db: sqlite3.Connection, config: Config, home: Path) -> str:
         out.append(line + "\n")
         roots = ", ".join(str(root).replace(str(Path.home()), "~") for root in source.roots)
         out.append(f"    roots: {roots}\n")
+    queued = json.loads(meta.get("queued_prompts_from", "null") or "null")
+    if queued and queued["sessions"]:
+        out.append(
+            f"  {queued['sessions']} Claude Code sessions indexed before {queued['time']} lack "
+            "the prompts typed while the agent was working, until then\n"
+        )
     verified, oldest, active = db.execute(
         "SELECT count(verified_at), min(verified_at), count(*) FROM sources WHERE state = 'active'"
     ).fetchone()

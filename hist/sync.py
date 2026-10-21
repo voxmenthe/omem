@@ -614,6 +614,7 @@ def _sync_locked(
         defer = not backfill and db.execute(
             "SELECT 1 FROM meta WHERE key = 'backfilled'"
         ).fetchone() is None
+        marked = db.execute("SELECT 1 FROM meta WHERE key = 'queued_prompts_from'").fetchone()
         listing = CachedListing(db)
         known = {
             (row[1], row[2]): row
@@ -621,6 +622,15 @@ def _sync_locked(
                 "SELECT id, adapter, native_id, label, path, token, state FROM sources"
             )
         }
+    if marked is None:
+        # Claude Code prompts queued mid-turn are indexed from this version on;
+        # `status` counts the sessions indexed before it, which lack them.
+        with store.write() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO meta (key, value) SELECT 'queued_prompts_from', "
+                "json_object('time', ?, 'sessions', count(*)) FROM sources WHERE adapter = 'claude'",
+                (utc_now(),),
+            )
     found, alarms = _discover(config, listing, {k: v[4] for k, v in known.items()})
     install_epoch = calendar.timegm(time.strptime(install, "%Y-%m-%dT%H:%M:%SZ"))
     threads = {
