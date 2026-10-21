@@ -39,7 +39,7 @@ roots = ["~/.gemini/antigravity-cli"]
 
 [discovery]
 # Scanned only to report session stores that no source claims.
-watch = ["~/.codex*", "~/.claude*", "~/.commandcode*", "~/.kimi*", "~/.local/share/opencode", "~/.gemini/antigravity"]
+watch = ["~/.codex*", "~/.claude*", "~/.commandcode*", "~/.kimi*", "~/.grok*", "~/.local/share/opencode", "~/.gemini/antigravity"]
 exclude = []                       # paths or repositories never indexed
 
 [view]

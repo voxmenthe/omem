@@ -714,19 +714,22 @@ def timelines(db: sqlite3.Connection, after: str | None) -> str:
 
 
 def _unclaimed(config: Config) -> list[str]:
-    """Watched locations holding sessions that no configured source covers."""
+    """Watched locations holding sessions that no configured source covers,
+    each directory once however many links reach it."""
 
     roots = [os.path.realpath(root) for source in config.sources for root in source.roots]
     markers = {"sessions", "archived_sessions", "projects", "conversations"}
     found: list[str] = []
+    walked: set[str] = set()
     for pattern in config.watch:
         for match in sorted(glob.glob(os.path.expanduser(pattern))):
             real = os.path.realpath(match)
-            if not os.path.isdir(real) or any(
+            if real in walked or not os.path.isdir(real) or any(
                 real == root or real.startswith(root + "/") or root.startswith(real + "/")
                 for root in roots
             ):
                 continue
+            walked.add(real)
             for directory, subdirs, files in os.walk(real):
                 depth = directory[len(real) :].count(os.sep)
                 if markers & set(subdirs) or "opencode.db" in files:

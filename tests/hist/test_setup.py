@@ -1,5 +1,6 @@
 """A new user's setup: the example configuration and the instruction block."""
 
+import re
 import shutil
 
 from tests.hist.fixtures import (
@@ -50,6 +51,15 @@ class NewUserTest(HistCase):
         status = self.hist("status", env=home).stdout
         for label in ("codex", "claude", "commandcode", "opencode", "devin", "antigravity"):
             self.assertIn(f"{label} ({label}): 1 indexed", status)
+
+    def test_the_example_configuration_flags_each_unread_store_once(self) -> None:
+        shutil.copy(REPO_ROOT / "hist" / "config.example.toml", self.home / "config.toml")
+        for name in (".grok", ".grok2"):
+            (self.base / name / "sessions" / "%2Fwork%2Fproj" / "s1").mkdir(parents=True)
+        (self.base / ".grok-acct").symlink_to(self.base / ".grok")
+        status = self.hist("status", env={"HOME": str(self.base)}).stdout
+        self.assertEqual(re.findall(r"unclaimed: (\S+) holds sessions", status),
+                         [str(self.base / ".grok"), str(self.base / ".grok2")])
 
     def test_instructions_print_the_packaged_block_before_any_configuration(self) -> None:
         (self.home / "config.toml").unlink()
