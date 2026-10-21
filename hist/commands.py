@@ -30,10 +30,14 @@ _REF = re.compile(
     r"(?P<start>\d+)(?:\+(?P<size>\d+))?"
 )
 _TIMELINE_COLUMNS = "id, name, kind, display, length, repo_identity"
+# `human` is not stored: it is a `user` message in an interactive session, so it
+# leaves out the tasks agents write for workers and subagents.
+HUMAN = "human"
 # `--kind` takes the labels lines print and the stored names.
 _KINDS = {
     "user": "user", "agent": "agent", "tool": "tool_call", "tool_call": "tool_call",
     "result": "tool_result", "tool_result": "tool_result", "work": "work", "event": "event",
+    HUMAN: HUMAN,
 }
 
 VIEW_HEADER = """<hist>
@@ -334,6 +338,16 @@ def _kinds(kinds: str | None) -> tuple[str, ...]:
     return tuple(wanted)
 
 
+def _kind_clause(kinds: tuple[str, ...]) -> tuple[str, list[object]]:
+    """SQL for `--kind` over messages `m` joined to their sessions `x`."""
+
+    stored = [kind for kind in kinds if kind != HUMAN]
+    parts = [f"m.kind IN ({','.join('?' * len(stored))})"] if stored else []
+    if HUMAN in kinds and "user" not in stored:
+        parts.append("(m.kind = 'user' AND x.class = 'interactive')")
+    return f"({' OR '.join(parts)})", list(stored)
+
+
 def find_filters(
     db: sqlite3.Connection,
     *,
@@ -406,11 +420,14 @@ def find(
     for column, values, negate in (
         ("m.session_id", filters.sessions, False),
         ("m.session_id", filters.exclude or None, True),
-        ("m.kind", filters.kinds or None, False),
     ):
         if values is not None:
             clauses.append(f"{column} {'NOT IN' if negate else 'IN'} ({','.join('?' * len(values))})")
             params.extend(values)
+    if filters.kinds:
+        clause, values = _kind_clause(filters.kinds)
+        clauses.append(clause)
+        params.extend(values)
     if filters.since is not None:
         clauses.append("m.time >= ?")
         params.append(filters.since)
@@ -612,14 +629,22 @@ def read(
         raise UsageError("give --after or --tail, not both")
     if tail is not None and tail < 1:
         raise UsageError("--tail takes a positive number of messages")
-    wanted = _kinds(kinds)
-    kept = f" AND m.kind IN ({', '.join('?' * len(wanted))})" if wanted else ""
-    flags = f" --kind {','.join(wanted)}" if wanted else ""
+    named = _kinds(kinds)
+    flags = f" --kind {','.join(named)}" if named else ""
     session_id, alias, timeline_id = session_named(db, name)
     timeline = _timeline(
         db, db.execute(f"SELECT {_TIMELINE_COLUMNS} FROM timelines WHERE id = ?", (timeline_id,)).fetchone()
     )
-    session_label = db.execute("SELECT label FROM sessions WHERE id = ?", (session_id,)).fetchone()[0]
+    session_label, session_class = db.execute(
+        "SELECT label, class FROM sessions WHERE id = ?", (session_id,)
+    ).fetchone()
+    wanted = tuple(dict.fromkeys(
+        "user" if kind == HUMAN else kind
+        for kind in named if kind != HUMAN or session_class == "interactive"
+    ))
+    if named and not wanted:
+        return "no messages\n"
+    kept = f" AND m.kind IN ({', '.join('?' * len(wanted))})" if wanted else ""
 
     def line(position: int, kind: str, tool: str | None, text: str) -> str:
         return f"{timeline.ref_name}:{position}+1|" + clip_line(

@@ -56,6 +56,25 @@ an agent given no hint found an answer buried in an older session from another
 host with one `hist zoom` and 803 bytes of output. The same works for details a
 long session lost to compaction.
 
+### Hear the user's earlier verdicts
+
+Before handing over something the user has judged before, such as agent
+guidance, a design or a report, search for their own words about that kind of
+work, in every repository:
+
+```bash
+hist find "too prescriptive" --all --kind human
+```
+
+Here that found the same objection, to guidance that spelled out too much for
+agents, in another project months earlier. It would have predicted the user's
+critique of a later draft. `--kind human` keeps user messages from interactive
+sessions, so it leaves out the tasks agents wrote for workers and subagents,
+which `--kind user` includes. It also leaves out sessions too old for their
+host to have recorded how they started, Claude Code before March 2026 and
+Codex before mid-September 2025; `hist status` counts them as unclassified,
+and `--kind user` reaches them.
+
 ### Search all history
 
 ```bash
@@ -76,7 +95,7 @@ piping through `grep`:
 | Filter | Keeps |
 |---|---|
 | `--session ALIAS` | that session and the sessions it started, in any timeline; `self` names your own |
-| `--kind K,...` | `user`, `agent`, `tool`, `result`, `work` or `event` messages |
+| `--kind K,...` | `user`, `agent`, `tool`, `result`, `work` or `event` messages; `human` is a `user` message in an interactive session, leaving out tasks agents wrote |
 | `--since T`, `--until T` | messages at or after `T`, or before it; UTC unless `T` gives an offset |
 
 `find` leaves out the session that runs it, and the sessions that session

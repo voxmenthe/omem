@@ -99,6 +99,19 @@ class FindTest(HistCase):
         self.assertEqual(bad.returncode, 2)
         self.assertIn("--kind 'reply' is not one of", bad.stderr)
 
+    def test_human_leaves_out_the_tasks_agents_wrote(self) -> None:
+        users = hits(self.hist("find", "zebra", "--all", "--include-self", "--kind", "user").stdout)
+        (task,) = [line for line in users if "zebra from its subagent" in line]
+        humans = hits(self.hist("find", "zebra", "--all", "--include-self", "--kind", "human").stdout)
+        self.assertEqual(sorted(humans), sorted(line for line in users if line != task))
+        mixed = hits(self.hist("find", "zebra", "--all", "--include-self", "--kind", "human,agent").stdout)
+        self.assertEqual(len(mixed), len(humans) + 2)
+        subagent = re.search(r"\[s:(\w+) ", task).group(1)
+        self.assertEqual(self.hist("read", subagent, "--kind", "human").stdout, "no messages\n")
+        own = self.hist("read", OTHER[-8:], "--kind", "human").stdout
+        self.assertIn("zebra in another session", own)
+        self.assertNotIn("zebra reply", own)
+
     def test_continuations_repeat_the_filters(self) -> None:
         for n in range(12):
             write_jsonl(Codex.path(self.codex, OTHER), [Codex.user(f"zebra again {n}", 22)])
