@@ -143,6 +143,23 @@ the rest.
 Use this to review what an unattended agent did, or to write up a session's
 decisions afterwards.
 
+### Trace a memory or a commit to its conversation
+
+An integrated memory cites the candidates it came from as `sources:#N`.
+`memory candidates <self|repo> . | grep -F '#N '` prints candidate N with its
+trigger context. If that context cites a `hist` reference, open it with
+`hist zoom`. Otherwise search for a distinctive phrase of the candidate:
+
+```bash
+hist find "<distinctive phrase>" --all --kind tool   # the `memory note` call that recorded it
+hist find 3f2a91c --all --kind result                # the session whose `git commit` printed this sha
+```
+
+Then zoom into the conversation around the hit. A mention is evidence, not
+proof: a phrase may be quoted elsewhere, and a session that prints a sha did
+not necessarily write the commit. A rebased commit has a new sha; search for
+its subject line instead.
+
 ### Widen the view gradually
 
 Start with a few active repositories in `view.inject` and add more as the view

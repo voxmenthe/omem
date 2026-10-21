@@ -34,6 +34,7 @@ existing index without syncing. `hist` with no arguments lists the commands.
   then `hist read <alias> --tail 20` for its last steps.
 - Replay any session in order with `hist read`, or read its end with
   `--tail N`; `--kind user,agent` keeps only the conversation.
+- Trace a memory or a commit to the conversation behind it with `hist find`.
 - Widen `view.inject` as the view proves useful, and summarize only small
   timelines.
 
