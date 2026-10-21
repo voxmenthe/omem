@@ -236,6 +236,15 @@ short block for that; add it to your global instruction files,
 `~/.codex/AGENTS.md` for Codex and `~/.claude/CLAUDE.md` for Claude Code, and
 replace it after upgrading.
 
+The block names the usual cues: the user points back, compaction took a
+detail, an error looks familiar, a worker has finished. It also welcomes a
+short probe whenever earlier work might change what the agent builds, tests,
+or avoids, gives three probes that have paid off, and says how to search well.
+In a review of real use, agents already reached for `hist` unprompted; what
+wasted their time was technique, such as one-word searches and polling
+running workers, so the block teaches technique rather than adding rules. The
+view's header carries the same invitation.
+
 ## Install the hooks (optional)
 
 Without hooks, every command still works and capture is complete. The hook

@@ -101,7 +101,8 @@ Nothing here is preconfigured; set up these three pieces yourself:
 
 1. *Instructions.* Add the output of `hist instructions` to your global
    instruction files, `~/.codex/AGENTS.md` for Codex and `~/.claude/CLAUDE.md`
-   for Claude Code, so agents in every repository know when to search history.
+   for Claude Code, so agents in every repository know when history is worth a
+   look, including a short probe when earlier work might change what they do.
    The `memory instructions` block goes in each repository, as above.
 2. *Hooks.* From the `omem` checkout, preview and then merge both tools' hooks
    into Claude Code's and Codex's settings:

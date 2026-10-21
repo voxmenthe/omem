@@ -133,6 +133,14 @@ hist read 934fad40 --tail 1 --kind agent # its final answer
 `read` clips each message to one line; to print the final answer whole, pass
 `hist zoom` its reference without the `+1`.
 
+To check one claim, search the worker's session in the words its tools print,
+not the words of its report: a test runner prints `pass 53`, not "tests
+passed".
+
+```bash
+hist find "pass" --session 934fad40 --kind result
+```
+
 Codex workers and Claude Code subagents are linked to their parents
 automatically, and so are OpenCode and Antigravity subagents. A worker started
 from a shell is linked when its launcher names the parent: by exporting
