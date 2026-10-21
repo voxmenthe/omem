@@ -3,6 +3,7 @@
 import argparse
 import os
 import sqlite3
+import subprocess
 import sys
 import time
 from importlib import resources
@@ -14,12 +15,15 @@ from .caller import Caller, detect
 from .config import Config, ConfigError, hist_home, load_config
 from .hook import main as hook_main
 from .refresh import refresh
-from .store import Store, StoreBusy, StoreError, text_version
+from .store import DATABASE_NAME, Store, StoreBusy, StoreError, text_version
 from .summarize import BACKENDS
 from .summarize import main as summarize_main
 from .sync import Report, sync, verify
 
 SYNC_SECONDS = 1.0
+# A read whose sync runs out of time starts one bounded sync in the background.
+CATCH_UP_SECONDS = 60.0
+CATCH_UP_LOG = "catch-up.log"
 USAGE = """hist: every agent session on this machine, indexed and navigable by reference.
 
   hist view [TIMELINE] [--bytes N]        orientation view; default: this repository
@@ -93,6 +97,7 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="sources, freshness, alarms, disk")
     sync_parser = sub.add_parser("sync", help="index new records")
     sync_parser.add_argument("--all", action="store_true", help="also backfill sessions from before install")
+    sync_parser.add_argument("--catch-up", action="store_true", help=argparse.SUPPRESS)
     verify_parser = sub.add_parser("verify", help="re-hash indexed transcripts")
     verify_parser.add_argument("session", nargs="?", help="only this session")
     refresh = sub.add_parser("refresh", help="bring stored text up to the current rules")
@@ -114,13 +119,34 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _staleness(report: Report, store: Store) -> str:
+def _read_seconds() -> float:
+    """How long a read syncs first; tests shorten it with `HIST_SYNC_SECONDS`."""
+
+    return float(os.environ.get("HIST_SYNC_SECONDS", SYNC_SECONDS))
+
+
+def _catch_up(home: Path) -> bool:
+    """Start `hist sync --catch-up` detached, its output in `CATCH_UP_LOG`."""
+
+    try:
+        with open(home / CATCH_UP_LOG, "w", encoding="utf-8") as log:
+            subprocess.Popen(
+                [sys.executable, "-m", "hist", "sync", "--catch-up"],
+                cwd=home, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
+            )
+    except OSError:
+        return False
+    return True
+
+
+def _staleness(report: Report, store: Store, catching_up: bool) -> str:
     if report.complete:
         return ""
     last = store.connection.execute("SELECT value FROM meta WHERE key = 'last_complete_sync'").fetchone()
     when = last[0] if last else "not recorded"
     why = "another process is syncing" if report.busy else "the sync time budget ran out"
-    return f"(index may be behind: {why}; last complete sync {when}; `hist sync` catches up)\n"
+    then = "a background `hist sync` is catching up" if catching_up else "`hist sync` catches up"
+    return f"(index may be behind: {why}; last complete sync {when}; {then})\n"
 
 
 def _caller(args: argparse.Namespace, config: Config) -> Caller | None:
@@ -181,6 +207,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "instructions":
         sys.stdout.write(resources.files("hist").joinpath("INSTRUCTIONS.md").read_text(encoding="utf-8"))
         return 0
+    if args.command == "sync" and args.catch_up and not (home / DATABASE_NAME).exists():
+        # The store was removed after the read that started this catch-up.
+        return 0
     cwd = Path.cwd()
     try:
         config = load_config(home)
@@ -191,7 +220,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "sync":
             started = time.monotonic()
-            report = sync(store, config, deadline=float("inf"), backfill=args.all, wait=5.0)
+            # A catch-up tries the lock once, so at most one runs, and it stops in time.
+            deadline, wait = (started + CATCH_UP_SECONDS, 0.0) if args.catch_up else (float("inf"), 5.0)
+            report = sync(store, config, deadline=deadline, backfill=args.all, wait=wait)
             if report.busy:
                 print("hist: another process is syncing; try again", file=sys.stderr)
                 return 1
@@ -232,8 +263,9 @@ def main(argv: list[str] | None = None) -> int:
             target.chmod(0o600)
             print(f"backed up to {target}")
             return 0
-        report = sync(store, config, deadline=time.monotonic() + SYNC_SECONDS)
-        prefix = _staleness(report, store)
+        report = sync(store, config, deadline=time.monotonic() + _read_seconds())
+        catching_up = not report.complete and not report.busy and _catch_up(home)
+        prefix = _staleness(report, store, catching_up)
         if args.command == "status":
             with store.read() as db:
                 sys.stdout.write(prefix + commands.status(db, config, home))

@@ -14,9 +14,12 @@ mkdir -p ~/.hist && cp hist/config.example.toml ~/.hist/config.toml   # default 
 hist sync --all && hist timelines
 ```
 
-Normal read commands attempt an incremental sync before reading; `hist sync`
-explicitly refreshes the index. Startup hooks use the existing index without
-syncing. `hist` with no arguments lists the commands.
+Normal read commands sync for up to a second before reading; `hist sync`
+explicitly refreshes the index. When a read's second runs out, its first line
+says the index may be behind, and it starts one `hist sync` in the background
+to finish. That sync stops after a minute, does nothing if another sync is
+running, and writes its result to `~/.hist/catch-up.log`. Startup hooks use the
+existing index without syncing. `hist` with no arguments lists the commands.
 
 ## Ways to use
 

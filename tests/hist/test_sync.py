@@ -128,8 +128,33 @@ class ThreeHostsTest(HistCase):
         with open(self.home / "sync.lock", "w") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             out = self.hist("view").stdout
+            started = time.monotonic()
+            caught = self.hist("sync", "--catch-up", check=False)
+            # A catch-up tries the lock once instead of waiting its turn.
+            self.assertLess(time.monotonic() - started, 4)
         self.assertTrue(out.startswith("(index may be behind: another process is syncing"), out)
         self.assertIn("<hist>", out)
+        self.assertEqual(caught.returncode, 1)
+        self.assertFalse((self.home / "catch-up.log").exists())
+
+    def test_a_read_out_of_time_leaves_the_rest_to_a_background_sync(self) -> None:
+        out = self.hist("status", env={"HIST_SYNC_SECONDS": "0"}).stdout
+        first = out.splitlines()[0]
+        self.assertTrue(first.startswith("(index may be behind: the sync time budget ran out"), first)
+        self.assertTrue(first.endswith("; a background `hist sync` is catching up)"), first)
+        log = self.home / "catch-up.log"
+        deadline = time.monotonic() + 60
+        while "indexed" not in (log.read_text() if log.exists() else ""):
+            self.assertLess(time.monotonic(), deadline, "the catch-up never finished")
+            time.sleep(0.05)
+        self.assertIn("from 3 changed sources", log.read_text())
+        self.assertTrue(self.hist("sync").stdout.startswith("indexed 0 messages"))
+
+    def test_a_catch_up_never_recreates_a_removed_store(self) -> None:
+        gone = self.base / "removed-home"
+        caught = self.hist("sync", "--catch-up", env={"HIST_HOME": str(gone)})
+        self.assertEqual((caught.stdout, caught.stderr), ("", ""))
+        self.assertFalse(gone.exists())
 
 
 class ClassificationTest(HistCase):
