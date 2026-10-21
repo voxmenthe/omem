@@ -115,11 +115,13 @@ hist read 934fad40 --tail 1 --kind agent # its final answer
 `hist zoom` its reference without the `+1`.
 
 Codex workers and Claude Code subagents are linked to their parents
-automatically. A Claude Code worker started from a Claude Code shell is linked
-only when its launcher exports `HIST_PARENT` (see [README.md](README.md)).
-OpenCode and Antigravity subagents are linked to their parents too. A worker
-on any other host, such as Devin, is recorded but not linked to the session
-that started it, and Kimi sessions are not recorded.
+automatically, and so are OpenCode and Antigravity subagents. A worker started
+from a shell is linked when its launcher names the parent: by exporting
+`HIST_PARENT` for a Claude Code worker, or on any host by ending its task with
+a `[hist-parent …]` line ([README.md](README.md#link-workers-by-a-marker-line)).
+The start note in the parent's timeline then says `started (marker)`. Other
+workers are recorded but not linked, and Kimi and Grok sessions are not
+recorded.
 
 ### Audit or replay a session
 

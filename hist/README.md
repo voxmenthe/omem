@@ -66,7 +66,8 @@ transcript on the machine (32,483 sources, 35 GB, 2.75 million messages) took
 Command Code, OpenCode, Devin, and the Antigravity CLI have no start hook, so
 their sessions are indexed and searchable but are never shown the view or the
 worker header. A subagent links to the session that started it on the same
-host; a session started from another host's shell is not linked. Each
+host; a worker started from another host's shell is linked only when its
+launcher writes a [marker line](#link-workers-by-a-marker-line). Each
 adapter's docstring in `hist/adapters/` describes its store.
 
 - Command Code (`~/.commandcode/projects`): a session is interactive unless its
@@ -90,6 +91,41 @@ adapter's docstring in `hist/adapters/` describes its store.
   with `-p`. Results of the older, specific tool steps (view file, run command,
   ...) are counted in `hist status`, not indexed; the calls are. The
   Antigravity IDE's store, `~/.gemini/antigravity`, is not read.
+
+### Link workers by a marker line
+
+A launcher that starts a worker from an agent session can name that session at
+the end of the worker's task, on a line of its own:
+
+```text
+[hist-parent claude:5e2a9f0c-1b7d-4c3e-9a8f-0d6e2b4c7a91]
+```
+
+The value names the parent by its adapter, such as `claude` or `codex`, and
+the session id its host gave it. When sync indexes the first prompt of a worker
+or subagent, on any host, it records the last marker there as the parent,
+unless that marker names the worker itself or an adapter no source uses. The
+link resolves once the parent is indexed. A link the host or a hook recorded
+first stands, and a marker anywhere later in a session does nothing. Because
+the link rests on the launcher's word, the worker's start note in the parent's
+timeline says `started (marker)`. Workers started before their launcher wrote
+markers stay unlinked.
+
+In a launcher that takes the task as `$task`, from a Codex or Claude Code
+shell:
+
+```bash
+if [[ -n "${CLAUDE_CODE_SESSION_ID:-}" && -z "${CODEX_THREAD_ID:-}" ]]; then
+  task+=$'\n\n'"[hist-parent claude:${CLAUDE_CODE_SESSION_ID}]"
+elif [[ -n "${CODEX_THREAD_ID:-}" && -z "${CLAUDE_CODE_SESSION_ID:-}" ]]; then
+  task+=$'\n\n'"[hist-parent codex:${CODEX_THREAD_ID}]"
+fi
+```
+
+With both variables set, or neither, it writes nothing, as the hook records
+nothing for conflicting variables. Hosts other than Codex and Claude Code set
+neither variable, so a worker that one of their workers starts links to the
+nearest Codex or Claude Code session above it.
 
 ## Summaries (optional)
 
@@ -243,7 +279,9 @@ fi
 Give the function a subshell body, `name() ( … )`, so the variable does not
 outlive the launch. An inherited `HIST_PARENT` is ignored when
 the shell's own session variable names a different session of the same host,
-so that worker's own workers link to it rather than to its parent.
+so that worker's own workers link to it rather than to its parent. A
+[marker line](#link-workers-by-a-marker-line) in the task also links such a
+worker, and is the only way to link a worker on a host without hooks.
 
 Check a hook by hand from a repository in `view.inject`:
 

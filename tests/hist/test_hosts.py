@@ -2,10 +2,23 @@
 
 import json
 
-from tests.hist.fixtures import Antigravity, CommandCode, Devin, HistCase, OpenCode, protobuf, write_jsonl
+from tests.hist.fixtures import (
+    Antigravity,
+    Claude,
+    Codex,
+    CommandCode,
+    Devin,
+    HistCase,
+    OpenCode,
+    protobuf,
+    write_jsonl,
+)
+from hist.adapters import TEXT_PART_CHARS
 
 TYPED = "cc000000-0000-4000-8000-0000000000a1"
 PRINTED = "cc000000-0000-4000-8000-0000000000b2"
+CLAUDE_PARENT = "5e000000-0000-4000-8000-0000000000c1"
+CODEX_PARENT = "019a0000-0000-7000-8000-0000000000c2"
 
 
 class InstalledCase(HistCase):
@@ -284,3 +297,118 @@ class AntigravityTest(InstalledCase):
         self.assertEqual(
             self.db().execute("SELECT class FROM sessions WHERE native_id = ?", (open_,)).fetchone(),
             ("interactive",))
+
+
+class MarkerLinkTest(InstalledCase):
+    """A launcher's `[hist-parent <adapter>:<id>]` line links a worker on any host."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.cwd = str(self.repo)
+
+    def claude_parent(self) -> None:
+        write_jsonl(Claude.project(self.claude, self.cwd) / f"{CLAUDE_PARENT}.jsonl", [
+            Claude.user("p1", CLAUDE_PARENT, self.cwd, "delegate the audit", 1, promptSource="typed")])
+
+    def codex_parent(self) -> None:
+        write_jsonl(Codex.path(self.codex, CODEX_PARENT), [
+            Codex.meta(CODEX_PARENT, self.cwd, "cli", self.origin), Codex.user("delegate the review", 1)])
+
+    def command_code(self, session: str, *tasks: str, entrypoint: str | None = "print") -> None:
+        path = CommandCode.path(self.commandcode, self.cwd, session)
+        CommandCode.write_meta(path, **({"entrypoint": entrypoint} if entrypoint else {}))
+        write_jsonl(path, [CommandCode.session(session, self.cwd, 2)]
+                    + [CommandCode.user(task, 2 + n) for n, task in enumerate(tasks)])
+
+    def links(self) -> dict[str, tuple[str, str, int]]:
+        rows = self.db().execute("SELECT child_native, parent_native, via, resolved FROM links").fetchall()
+        return {child: (parent, via, resolved) for child, parent, via, resolved in rows}
+
+    def parents(self) -> dict[str, str]:
+        return dict(self.db().execute(
+            "SELECT c.native_id, p.native_id FROM sessions c JOIN sessions p ON p.id = c.parent_id").fetchall())
+
+    def test_workers_on_four_hosts_link_once_their_parent_is_indexed(self) -> None:
+        marker = f"[hist-parent claude:{CLAUDE_PARENT}]"
+        command = "cc000000-0000-4000-8000-0000000000d1"
+        self.command_code(command, f"audit the guard\n\n{marker}")
+        opencode = OpenCode(self.opencode)
+        self.addCleanup(opencode.close)
+        # OpenCode keeps a launcher's task JSON-quoted.
+        opencode.session("ses_worker00000d2", self.cwd, viewed=False)
+        opencode.add("ses_worker00000d2", [OpenCode.user(json.dumps(f"audit the guard\n\n{marker}\n"), 2),
+                                           OpenCode.idle(3)])
+        devin = Devin(self.devin)
+        self.addCleanup(devin.close)
+        # The marker straddles the boundary between the task's stored parts.
+        long_task = "audit the guard " + "x" * (TEXT_PART_CHARS - 26) + " " + marker + "\n\nDelegate task id: a1"
+        self.assertLess(long_task.index(marker), TEXT_PART_CHARS)
+        self.assertGreater(long_task.index(marker) + len(marker), TEXT_PART_CHARS)
+        devin.session("devin-worker-0000d3", self.cwd)
+        devin.add("devin-worker-0000d3", [(0, None, devin.prompt(0)), (1, 0, devin.user(long_task, 2))])
+        antigravity = Antigravity(self.antigravity)
+        self.addCleanup(antigravity.close)
+        agy = "a9000000-0000-4000-8000-0000000000d4"
+        antigravity.conversation(agy, self.cwd, minute=2)
+        antigravity.add(agy, [Antigravity.user(f"audit the guard\n\n{marker}", 2, printed=True)])
+        workers = [command, "ses_worker00000d2", "devin-worker-0000d3", agy]
+
+        self.hist("sync")
+        self.assertEqual(self.links(), {w: (CLAUDE_PARENT, "marker", 0) for w in workers})
+        self.claude_parent()
+        self.hist("sync")
+        self.assertEqual(self.links(), {w: (CLAUDE_PARENT, "marker", 1) for w in workers})
+        self.assertEqual(self.parents(), {w: CLAUDE_PARENT for w in workers})
+        events = [text for (text,) in self.db().execute(
+            "SELECT m.text FROM messages m JOIN sessions s ON s.id = m.session_id "
+            "WHERE s.native_id = ? AND m.kind = 'event' AND m.text LIKE 'worker %'", (CLAUDE_PARENT,))]
+        # Devin's worker started now; the fixtures' older workers are attached without a note.
+        devin_alias = self.db().execute(
+            "SELECT alias FROM sessions WHERE native_id = 'devin-worker-0000d3'").fetchone()[0]
+        self.assertIn(f"worker w-{devin_alias} started (marker): audit the guard xxx", "\n".join(events))
+        self.assertTrue(all(" started (marker): " in text for text in events), events)
+
+    def test_only_the_last_marker_of_a_workers_first_record_counts(self) -> None:
+        self.claude_parent()
+        self.codex_parent()
+        claude, codex = f"[hist-parent claude:{CLAUDE_PARENT}]", f"[hist-parent codex:{CODEX_PARENT}]"
+        last, later, own, unknown, bad_last, typed = (
+            f"cc000000-0000-4000-8000-0000000000e{n}" for n in range(1, 7))
+        self.command_code(last, f"forwarded packet:\n{codex}\nend of packet\n\n{claude}")
+        self.command_code(later, "audit the guard", f"now {claude}")
+        self.command_code(own, f"audit the guard [hist-parent commandcode:{own}]")
+        self.command_code(unknown, f"audit the guard [hist-parent kimi:{CLAUDE_PARENT}]")
+        self.command_code(bad_last, f"audit the guard {claude} [hist-parent commandcode:{bad_last}]")
+        self.command_code(typed, f"audit the guard {claude}", entrypoint=None)
+        self.hist("sync")
+        self.assertEqual(self.links(), {last: (CLAUDE_PARENT, "marker", 1)})
+        self.assertEqual(self.parents(), {last: CLAUDE_PARENT})
+
+    def test_a_native_or_hook_link_stands_and_a_marker_fills_an_empty_slot(self) -> None:
+        self.claude_parent()
+        self.codex_parent()
+        marker = f"[hist-parent codex:{CODEX_PARENT}]"
+        opencode = OpenCode(self.opencode)
+        self.addCleanup(opencode.close)
+        opencode.session("ses_parent0000f1", self.cwd)
+        opencode.session("ses_child00000f2", self.cwd, viewed=False, parent="ses_parent0000f1")
+        opencode.add("ses_parent0000f1", [OpenCode.user("plan the audit", 1), OpenCode.idle(1)])
+        opencode.add("ses_child00000f2", [OpenCode.user(f"audit the guard {marker}", 2), OpenCode.idle(2)])
+        hooked, unhooked = "4b000000-0000-4000-8000-0000000000f3", "4b000000-0000-4000-8000-0000000000f4"
+        project = Claude.project(self.claude, self.cwd)
+        payload = {"session_id": hooked, "transcript_path": str(project / f"{hooked}.jsonl"), "cwd": self.cwd,
+                   "hook_event_name": "SessionStart", "source": "startup"}
+        self.hist("hook", "claude", "SessionStart", stdin=json.dumps(payload),
+                  env={"HIST_PARENT": f"claude:{CLAUDE_PARENT}"})
+        for session in (hooked, unhooked):
+            write_jsonl(project / f"{session}.jsonl", [
+                Claude.user(f"w{session[-1]}", session, self.cwd, f"audit the guard {marker}", 2,
+                            entrypoint="sdk-cli")])
+        self.hist("sync")
+        self.assertEqual(self.links(), {
+            "ses_child00000f2": ("ses_parent0000f1", "native", 1),
+            hooked: (CLAUDE_PARENT, "HIST_PARENT", 1),
+            unhooked: (CODEX_PARENT, "marker", 1),
+        })
+        self.assertEqual(self.parents(), {
+            "ses_child00000f2": "ses_parent0000f1", hooked: CLAUDE_PARENT, unhooked: CODEX_PARENT})

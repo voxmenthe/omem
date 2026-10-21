@@ -16,6 +16,7 @@ import fcntl
 import heapq
 import json
 import os
+import re
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -44,6 +45,8 @@ LOCK_WAIT_SECONDS = 0.2
 COMMIT_BYTES = 4 * 1024 * 1024
 FOREVER = "9999"
 QUIET_LINK_SECONDS = 24 * 3600
+# A launcher's claim, in a worker's task, of the session that started it.
+PARENT_MARKER = re.compile(r"\[hist-parent ([a-z0-9]+):([A-Za-z0-9_.:-]{8,200})\]")
 
 
 class StaleProgress(RuntimeError):
@@ -213,6 +216,7 @@ class _Live:
     path: Path
     label: str
     session: int
+    klass: str
     timeline: int
     token: str
     committed: str
@@ -241,6 +245,7 @@ def _load_live(row: tuple[Any, ...], candidate: _Candidate) -> _Live:
         path=Path(candidate.found.path),
         label=label,
         session=session,
+        klass=klass,
         timeline=timeline,
         token=candidate.token,
         committed=cursor_json,
@@ -356,7 +361,26 @@ def _take(live: _Live, bound: str) -> tuple[list[Message], int]:
     return list(live.messages), len(live.records)
 
 
-def _commit(store: Store, group: list[_Live], report: Report) -> int:
+def _link_by_marker(db: Any, session: int, task: str, adapters: frozenset[str]) -> None:
+    """Record the parent named by the last marker in a worker's task, unless
+    it names an unconfigured host or the worker itself. A native or hook
+    link, recorded before any record is read, stands."""
+
+    markers = PARENT_MARKER.findall(task)
+    if not markers:
+        return
+    parent = markers[-1]
+    child = db.execute("SELECT adapter, native_id FROM sessions WHERE id = ?", (session,)).fetchone()
+    if parent[0] not in adapters or parent == tuple(child):
+        return
+    db.execute(
+        "INSERT OR IGNORE INTO links (child_adapter, child_native, parent_adapter, "
+        "parent_native, via, recorded_at) VALUES (?, ?, ?, ?, 'marker', ?)",
+        (*child, *parent, utc_now()),
+    )
+
+
+def _commit(store: Store, group: list[_Live], report: Report, adapters: frozenset[str]) -> int:
     active = [s for s in group if s.stopped is None]
     pending = [s for s in active if not s.done]
     bound = min((s.frontier for s in pending), default=FOREVER)
@@ -394,6 +418,8 @@ def _commit(store: Store, group: list[_Live], report: Report) -> int:
             "SELECT length, last_time FROM timelines WHERE id = ?", (timeline,)
         ).fetchone()
         sessions: dict[int, list[Any]] = {}
+        # A worker's first user or work record is its task, all parts in one commit.
+        tasks: dict[int, tuple[int, int, list[str]] | None] = {}
         for _, k, _, message in ordered:
             live = plans[k][0]
             if db.execute(
@@ -405,6 +431,16 @@ def _commit(store: Store, group: list[_Live], report: Report) -> int:
             ):
                 continue
             text = redact(message.text)
+            if live.klass in ("worker", "subagent") and message.kind in ("user", "work"):
+                if live.session not in tasks:
+                    tasked = db.execute(
+                        "SELECT 1 FROM messages WHERE session_id = ? AND kind IN ('user', 'work') LIMIT 1",
+                        (live.session,),
+                    ).fetchone()
+                    tasks[live.session] = None if tasked else (live.row, message.record, [])
+                task = tasks[live.session]
+                if task is not None and task[:2] == (live.row, message.record):
+                    task[2].append(text)
             cursor = db.execute(
                 "INSERT INTO messages (timeline_id, position, source_id, record, part, "
                 "session_id, kind, tool, time, text, key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -420,6 +456,9 @@ def _commit(store: Store, group: list[_Live], report: Report) -> int:
             last_time = max(last_time or message.time, message.time)
             length += 1
             added += 1
+        for session, task in tasks.items():
+            if task is not None:
+                _link_by_marker(db, session, "".join(task[2]), adapters)
         db.execute(
             "UPDATE timelines SET length = ?, last_time = ? WHERE id = ?",
             (length, last_time, timeline),
@@ -472,7 +511,9 @@ def _completed(host: Any, path: Path, message: Message) -> Message:
     return message if whole is None else replace(message, text=whole)
 
 
-def _ingest(store: Store, group: list[_Live], deadline: float, report: Report) -> None:
+def _ingest(
+    store: Store, group: list[_Live], deadline: float, report: Report, adapters: frozenset[str]
+) -> None:
     for live in group:
         try:
             live.cursor, live.verified = adapter(live.adapter).reader.check(live.path, live.cursor)
@@ -514,9 +555,9 @@ def _ingest(store: Store, group: list[_Live], deadline: float, report: Report) -
             live.frontier = max(live.frontier, messages[-1].turn)
         buffered += size
         if buffered >= COMMIT_BYTES:
-            _commit(store, group, report)
+            _commit(store, group, report, adapters)
             buffered = 0
-    _commit(store, group, report)
+    _commit(store, group, report, adapters)
 
 
 def _shifted(stamp: str, seconds: int) -> str:
@@ -579,7 +620,9 @@ def _resolve_links(store: Store) -> None:
             ).fetchone()
             db.execute("UPDATE sessions SET parent_id = ? WHERE id = ?", (parent_id, child_id))
             now = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
-            text = redact(f"worker w-{alias} started: {' '.join(task[0].split())[:200]}")
+            # Event lines hide their tool, so the text says when only a marker vouches for the link.
+            how = " (marker)" if via == "marker" else ""
+            text = redact(f"worker w-{alias} started{how}: {' '.join(task[0].split())[:200]}")
             inserted = db.execute(
                 "INSERT INTO messages (timeline_id, position, source_id, record, part, "
                 "session_id, kind, tool, time, text) VALUES (?, ?, ?, -2, 0, ?, 'event', ?, ?, ?)",
@@ -700,6 +743,7 @@ def _sync_locked(
                 if not later(candidate):
                     preferred.add(live.timeline)
     report.sources = sum(len(group) for group in groups.values())
+    adapters = frozenset(source.adapter for source in config.sources)
     for timeline, group in sorted(
         groups.items(),
         key=lambda item: (item[0] not in preferred, min(s.frontier for s in item[1])),
@@ -707,7 +751,7 @@ def _sync_locked(
         if time.monotonic() >= deadline:
             report.complete = False
             break
-        _ingest(store, group, deadline, report)
+        _ingest(store, group, deadline, report, adapters)
     _resolve_links(store)
     with store.write() as db:
         listing.save(db)
