@@ -258,9 +258,34 @@ nothing outside `view.inject`. Failures go to stderr and never block the host.
 - `hist verify [SESSION]`: re-hashes indexed transcripts to catch in-place
   rewrites that per-sync checks cannot see; exits 1 if any source stopped.
 - `hist backup PATH`: a consistent copy of the store.
+- `hist refresh [--dry-run]`: brings rows stored under older text rules up to
+  the current ones; see below. `hist status` says when it is due.
 
 A source stops, loudly, when its transcript no longer extends what was indexed
 or breaks its adapter's expectations; the rest keep syncing.
+
+### Refresh stored text
+
+The rules for stored text sometimes improve: a new secret format to redact,
+or a host that saves large outputs apart from its transcript. New rows follow
+the current rules. `hist refresh` brings the older rows up to them in place,
+so every reference stays valid:
+
+- a Claude Code saved-output preview becomes the whole output (head and tail,
+  30,000 characters), when its file is still a regular file under that
+  session's `tool-results/`;
+- the current redaction rules mask what older ones missed;
+- rows whose JSON escapes were indexed undecoded are reindexed (stores from
+  before text rules version 2 only).
+
+Run `hist refresh --dry-run` first: it counts what would change, per
+redaction rule, with masked samples, and changes nothing. Take a
+`hist backup` before the real run if you want a way back, then delete the
+backup once you no longer need it: it still holds whatever the refresh
+masked. A refresh commits in batches, waits out syncs, and resumes where it
+stopped if interrupted. It zeroes the text SQLite frees and checkpoints the
+log, but the full-text index keeps fragments of the old words, lowercased,
+until it is optimized; that cleanup comes with purge.
 
 Not implemented yet: `purge`, `restore`, `reset`, and background summary
 builds (`hist build` runs synchronously). Every command, reads included, needs

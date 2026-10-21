@@ -14,7 +14,8 @@ from .build import BuildError, build
 from .caller import Caller, detect
 from .config import Config, ConfigError, hist_home, load_config
 from .hook import main as hook_main
-from .store import Store, StoreBusy, StoreError
+from .refresh import refresh
+from .store import Store, StoreBusy, StoreError, text_version
 from .summarize import BACKENDS
 from .summarize import main as summarize_main
 from .sync import Report, sync, verify
@@ -34,6 +35,7 @@ USAGE = """hist: every agent session on this machine, indexed and navigable by r
   hist status                             sources, freshness, alarms, disk
   hist sync [--all]                       index new records (reads do this automatically)
   hist verify [SESSION]                   re-hash indexed transcripts to catch in-place rewrites
+  hist refresh [--dry-run]                bring stored text up to the current rules
   hist build [--limit N]                  summaries for opted-in timelines
   hist summarize BACKEND [--model M]      a [summaries] command over an agent CLI or API:
                                           claude, codex, devin, opencode; anthropic, openai
@@ -94,6 +96,8 @@ def _parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--all", action="store_true", help="also backfill sessions from before install")
     verify_parser = sub.add_parser("verify", help="re-hash indexed transcripts")
     verify_parser.add_argument("session", nargs="?", help="only this session")
+    refresh = sub.add_parser("refresh", help="bring stored text up to the current rules")
+    refresh.add_argument("--dry-run", action="store_true", help="count what would change; change nothing")
     build_parser = sub.add_parser("build", help="summaries for opted-in timelines")
     build_parser.add_argument("--limit", type=int, help="build at most this many")
     summarize = sub.add_parser("summarize", help="a [summaries] command over an agent CLI or API")
@@ -212,6 +216,14 @@ def main(argv: list[str] | None = None) -> int:
                 + (f"; stopped: {', '.join(checked.stopped)}" if checked.stopped else "")
             )
             return 1 if checked.stopped else 0
+        if args.command == "refresh":
+            with store.read() as db:
+                before = text_version(db)
+            started = time.monotonic()
+            result = refresh(store, args.dry_run, lambda line: print(line, file=sys.stderr, flush=True))
+            sys.stdout.write(result.summary(args.dry_run, before))
+            print(f"in {time.monotonic() - started:.0f} s")
+            return 0
         if args.command == "backup":
             target = Path(args.path).expanduser()
             if target.exists():

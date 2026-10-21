@@ -4,8 +4,9 @@ Patterns name well-known credential shapes only; anything else is kept.
 Each match becomes `[redacted:<kind>]` so a reader knows something was there.
 Most vendor shapes follow gitleaks' rules (MIT), as flopwire rewrote them
 (`internal/redact/rules.go`). A rule's regex runs only on text holding one
-of its keywords, which keeps redaction cheap. A token's start may follow a
-JSON escape such as `\\n`, which `\\b` would not see as a boundary.
+of its keywords, which keeps redaction cheap and lets `hist refresh` find
+the stored rows a rule could change. A token's start may follow a JSON
+escape such as `\\n`, which `\\b` would not see as a boundary.
 """
 
 import math

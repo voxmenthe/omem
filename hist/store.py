@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import Iterator
 
 SCHEMA_VERSION = 1
+# Rows this version writes follow text rules version 2: JSON escapes decoded
+# for search, the wider redaction rules, Claude's persisted outputs read
+# whole. `hist refresh` brings rows from an older version up to it.
+TEXT_VERSION = 2
 DATABASE_NAME = "hist.db"
 WRITE_WAIT_MS = 200
 READ_RETRY_SECONDS = 1.0
@@ -218,6 +222,7 @@ class Store:
                     ("schema_version", str(SCHEMA_VERSION)),
                     ("generation", "1"),
                     ("install_time", utc_now()),
+                    ("text_version", str(TEXT_VERSION)),
                 ],
             )
 
@@ -283,6 +288,13 @@ class Store:
         return row[0]
 
 
+def text_version(db: sqlite3.Connection) -> int:
+    """The text rules every stored row follows; stores from before the key are 1."""
+
+    row = db.execute("SELECT value FROM meta WHERE key = 'text_version'").fetchone()
+    return 1 if row is None else int(row[0])
+
+
 def _json_start(text: str) -> int | None:
     body = len(text) - len(text.lstrip())
     if text[body : body + 1] in ("{", "["):
@@ -319,6 +331,29 @@ def search_text(text: str) -> str:
 
 def index_message(db: sqlite3.Connection, message_id: int, text: str) -> None:
     db.execute("INSERT INTO search (rowid, text) VALUES (?, ?)", (message_id, search_text(text)))
+
+
+def reindex_message(db: sqlite3.Connection, message_id: int, text: str) -> None:
+    db.execute("DELETE FROM search WHERE rowid = ?", (message_id,))
+    index_message(db, message_id, text)
+
+
+def replace_text(db: sqlite3.Connection, message_id: int, text: str) -> None:
+    """Replace one stored message's text in place.
+
+    Its position, and so every reference, stays; its search row is rebuilt;
+    the timeline's purge counter moves, so a summary built from the old
+    text is discarded, and every summary that ends at or after the message,
+    which covered it or took it as context, is dropped.
+    """
+
+    timeline, position = db.execute(
+        "SELECT timeline_id, position FROM messages WHERE id = ?", (message_id,)
+    ).fetchone()
+    db.execute("UPDATE messages SET text = ? WHERE id = ?", (text, message_id))
+    reindex_message(db, message_id, text)
+    db.execute("UPDATE timelines SET purge_counter = purge_counter + 1 WHERE id = ?", (timeline,))
+    db.execute("DELETE FROM nodes WHERE timeline_id = ? AND idx >= (? >> level)", (timeline, position))
 
 
 def database_bytes(home: Path) -> int:

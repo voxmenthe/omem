@@ -14,7 +14,7 @@ from .caller import Caller
 from .config import Config
 from .registry import lookup_directory
 from .render import Renderer, Timeline, clip_line, flat, kind_label, message_line, span
-from .store import database_bytes, search_text
+from .store import TEXT_VERSION, database_bytes, search_text
 from .tree import LINE_BYTES, ViewBudgetError, compute_view, node_at
 
 PAGE_BYTES = 8 * 1024
@@ -699,6 +699,12 @@ def status(db: sqlite3.Connection, config: Config, home: Path) -> str:
     else:
         state = "complete" if last["complete"] else "busy" if last["busy"] else "partial (time budget)"
         out.append(f"index: last sync {last['time']} ({state}, {last['added']} messages added)\n")
+    version = int(meta.get("text_version", "1"))
+    if version < TEXT_VERSION:
+        out.append(
+            f"text: stored rows follow text rules version {version}, not {TEXT_VERSION}; "
+            "`hist refresh --dry-run` shows what `hist refresh` would update\n"
+        )
     out.append("sources:\n")
     pending = (last or {}).get("pending", {})
     for source in config.sources:
