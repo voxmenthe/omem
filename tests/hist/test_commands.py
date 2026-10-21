@@ -2,9 +2,11 @@
 
 import re
 import shlex
+import sqlite3
 
+from hist import commands
 from hist.commands import LIST_BYTES, PAGE_BYTES, READ_BYTES
-from tests.hist.fixtures import Codex, HistCase, git_repo, write_jsonl
+from tests.hist.fixtures import Claude, Codex, HistCase, git_repo, write_jsonl
 
 SESSIONS = 55
 LONG = 300
@@ -99,3 +101,39 @@ class PagingTest(HistCase):
         self.assertGreater(len(pages), 2)
         text = "".join("\n".join(page[1:]) for page in pages)
         self.assertEqual(text, self.big)
+
+
+class DigestTest(HistCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.hist("status")
+        cwd = str(self.repo)
+        write_jsonl(Codex.path(self.codex, thread(1)), [
+            Codex.meta(thread(1), cwd, "cli", self.origin, minute=1),
+            Codex.user("continue", 1, 1),
+            Codex.user("rename the parser module and update its callers", 1, 2),
+            Codex.assistant("first reply", 1, 3),
+            Codex.assistant("renamed; callers updated", 1, 4),
+        ])
+        session = "7c000000-0000-4000-8000-0000000000a1"
+        markup = ("<command-message>review</command-message>\n<command-name>/review</command-name>\n"
+                  "<command-args>the retry logic in sync.py</command-args>")
+        write_jsonl(Claude.project(self.claude, cwd) / f"{session}.jsonl", [
+            Claude.user("u1", session, cwd, markup, 2)])
+        self.hist("sync")
+
+    def test_digests_decode_commands_skip_weak_prompts_and_end_with_the_last_reply(self) -> None:
+        out = self.hist("sessions").stdout
+        self.assertIn('"rename the parser module and update its callers" → "renamed; callers updated"', out)
+        self.assertIn('"/review the retry logic in sync.py"', out)
+
+    def test_a_page_costs_a_fixed_number_of_statements_per_session(self) -> None:
+        connection = sqlite3.connect(self.home / "hist.db")
+        self.addCleanup(connection.close)
+        timeline = commands.resolve_timeline(connection, "proj", self.repo)
+        statements: list[str] = []
+        connection.set_trace_callback(statements.append)
+        out = commands.sessions(connection, timeline, False, None)
+        self.assertEqual(len(out.splitlines()), 2)
+        # The page query, then the first prompts and last reply of each session.
+        self.assertEqual(len(statements), 1 + 2 * 2, statements)

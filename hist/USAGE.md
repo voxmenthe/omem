@@ -123,6 +123,10 @@ hist sessions myrepo        # sessions, newest first, each with its first refere
 hist read 149ae25c          # replay one; follow the `more:` line to continue
 ```
 
+Each session line shows its first telling prompt, skipping ones such as
+"continue" or a pasted traceback, with slash commands shown as `/name args`,
+then its last agent message.
+
 Use this to review what an unattended agent did, or to write up a session's
 decisions afterwards.
 

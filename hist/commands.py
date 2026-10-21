@@ -21,6 +21,7 @@ PAGE_BYTES = 8 * 1024
 LIST_BYTES = 4 * 1024
 READ_BYTES = 8 * 1024
 LIST_ROWS = 40
+SESSION_LINE_BYTES = 320
 FIND_HITS = 10
 FIND_SCAN = 2000
 MAX_DEPTH = 3
@@ -490,6 +491,51 @@ def _session_rows(
     ).fetchall()
 
 
+_COMMAND_NAME = re.compile(r"<command-name>\s*/?([^<]*?)\s*</command-name>")
+_COMMAND_ARGS = re.compile(r"<command-args>([\s\S]*?)(?:</command-args>|\Z)")
+# First prompts that say little about the session (flopwire's list).
+_WEAK = (
+    "continue", "go on", "go ahead", "keep going", "proceed", "resume", "carry on", "yes", "ok",
+    "okay", "this session is being continued", "traceback", "panic:", "error", "fatal:", "fail",
+    "exception", "```", "{", "[", "<", "$ ", "> ", "at ", "npm err", "diff --git", "--- ", "+++ ",
+)
+DIGEST_PROMPTS = 5
+
+
+def _prompt(text: str) -> str:
+    """A user message as typed: Claude Code's slash-command markup becomes `/name args`."""
+
+    name = _COMMAND_NAME.search(text)
+    if name is None:
+        return text
+    args = _COMMAND_ARGS.search(text)
+    return f"/{name.group(1)} {args.group(1) if args else ''}".strip()
+
+
+def _weak(prompt: str) -> bool:
+    flat_prompt = " ".join(prompt.split()).lower()
+    return len(flat_prompt) < 20 or flat_prompt.startswith(_WEAK)
+
+
+def _digest(db: sqlite3.Connection, session_id: int) -> str:
+    """The session's first telling prompt among its first few, and its last agent line."""
+
+    prompts = [
+        _prompt(text)
+        for (text,) in db.execute(
+            "SELECT text FROM messages WHERE session_id = ? AND kind = 'user' ORDER BY position LIMIT ?",
+            (session_id, DIGEST_PROMPTS),
+        )
+    ]
+    last = db.execute(
+        "SELECT text FROM messages WHERE session_id = ? AND kind = 'agent' ORDER BY position DESC LIMIT 1",
+        (session_id,),
+    ).fetchone()
+    task = next((prompt for prompt in prompts if not _weak(prompt)), prompts[0] if prompts else None)
+    out = "" if task is None else f' "{clip_line(flat(task), 140)}"'
+    return out + ("" if last is None else f' → "{clip_line(flat(last[0]), 100)}"')
+
+
 def sessions(
     db: sqlite3.Connection, timeline: Timeline, workers: bool, after: str | None
 ) -> str:
@@ -509,16 +555,11 @@ def sessions(
     used = 0
     for row in rows[:LIST_ROWS]:
         session_id, alias, label, klass, started, first, last, count, first_pos, name, key = row
-        task = db.execute(
-            "SELECT text FROM messages WHERE session_id = ? AND kind = 'user' ORDER BY position LIMIT 1",
-            (session_id,),
-        ).fetchone()
         when = span(first, last) if first and last else span(str(started), str(started))
         ref = f"{name}:{first_pos}" if first_pos is not None else "(not indexed yet)"
         line = clip_line(
-            f"{alias} {label} {klass} {when} {count} msgs from {ref}"
-            + (f' "{flat(task[0])}"' if task else ""),
-            200,
+            f"{alias} {label} {klass} {when} {count} msgs from {ref}" + _digest(db, int(session_id)),  # type: ignore[arg-type]
+            SESSION_LINE_BYTES,
         ) + "\n"
         if used + len(line.encode()) > LIST_BYTES:
             out.append(f"more: hist sessions {timeline.ref_name}{' --workers' if workers else ''} --after {key}/{session_id + 1}\n")
