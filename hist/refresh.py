@@ -125,6 +125,9 @@ def refresh(store: Store, dry_run: bool, progress: Callable[[str], None] = lambd
     report = RefreshReport()
     if not dry_run:
         store.connection.execute("PRAGMA secure_delete = ON")
+        # Each commit reaches the disk before it returns, so masked text that
+        # a refresh reported cannot come back after a power loss.
+        store.connection.execute("PRAGMA synchronous = FULL")
     with store.read() as db:
         last = db.execute("SELECT coalesce(max(id), 0) FROM messages").fetchone()[0]
         # Search rows written under version 2 rules are already decoded.

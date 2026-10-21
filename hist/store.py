@@ -191,7 +191,10 @@ class Store:
             path.chmod(0o600)
             connection.execute(f"PRAGMA busy_timeout = {WRITE_WAIT_MS}")
             connection.execute("PRAGMA journal_mode = WAL")
-            connection.execute("PRAGMA synchronous = FULL")
+            # Commits wait for no disk flush; checkpoints flush the log. A power
+            # loss or OS crash can roll back the last commits, in order, and the
+            # next sync indexes them again from the transcripts.
+            connection.execute("PRAGMA synchronous = NORMAL")
             connection.execute("PRAGMA fullfsync = ON")
             connection.execute("PRAGMA checkpoint_fullfsync = ON")
             connection.execute("PRAGMA foreign_keys = ON")

@@ -267,6 +267,13 @@ nothing outside `view.inject`. Failures go to stderr and never block the host.
 A source stops, loudly, when its transcript no longer extends what was indexed
 or breaks its adapter's expectations; the rest keep syncing.
 
+Commits do not wait for the disk (SQLite's `synchronous = NORMAL`). A power
+loss or OS crash can undo the commits since the last checkpoint, whole and in
+order, and the next sync indexes those messages again from the transcripts. A
+reference printed from them may then name a different message. A crash
+of `hist` itself loses nothing. `hist refresh` waits for the disk on every
+commit, so text it reports masked stays masked.
+
 ### Refresh stored text
 
 The rules for stored text sometimes improve: a new secret format to redact,
