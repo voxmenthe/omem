@@ -23,6 +23,9 @@ class HookHost:
     plain stdout to the model context. `compact_event` names the host event
     that carries the post-compaction recovery checkpoint, gated on
     `compact_source` when the event also fires for ordinary starts.
+    `generated_prompts` lists how prompts the host submits itself begin,
+    such as background-task notifications; the prompt hook stays silent for
+    them, since they hold no words from the user.
     """
 
     label: str
@@ -30,12 +33,18 @@ class HookHost:
     codec: HookCodec
     compact_event: str | None = None
     compact_source: str | None = None
+    generated_prompts: tuple[str, ...] = ()
 
 
 HOOK_HOSTS: Final[Mapping[str, HookHost]] = {
     "codex": HookHost("Codex", "codex-hook", "json", "SessionStart", "compact"),
     "claude": HookHost(
-        "Claude Code", "hook claude", "json", "SessionStart", "compact"
+        "Claude Code",
+        "hook claude",
+        "json",
+        "SessionStart",
+        "compact",
+        ("<task-notification>",),
     ),
     "devin": HookHost("Devin", "hook devin", "json", "SessionStart", "compact"),
     "kimi": HookHost("Kimi Code", "hook kimi", "text"),

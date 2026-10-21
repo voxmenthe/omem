@@ -462,7 +462,11 @@ and fail-open behavior as the Codex hook, and none of them writes memory.
 [`integrations/claude/settings.json`](integrations/claude/settings.json)
 binds `OMEM_HOST=claude` and registers the two Claude Code routes. The
 prompt route is validated in a headless `claude -p` session; the compaction
-route shares the Codex builder but has not been validated live.
+route shares the Codex builder but has not been validated live. Claude Code
+also submits each finished background task's notice as a prompt; in recent
+transcripts these outnumber typed prompts three to one. The prompt route
+returns nothing for a prompt that starts with `<task-notification>`, since it
+holds no words from the user.
 
 Devin reads the hooks in `~/.claude/settings.json` when its
 `read_config_from.claude` setting is on, which is the default, so the Claude

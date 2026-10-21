@@ -129,6 +129,11 @@ def command_host_hook(
         return _hook_warning(host, _MALFORMED_HOOK_WARNING)
 
     if event_name == "UserPromptSubmit":
+        prompt = event.get("prompt")
+        if isinstance(prompt, str) and prompt.lstrip().startswith(
+            host.generated_prompts
+        ):
+            return 0
         event_kind: EventKind = "turn"
         deadline: float | None = time.monotonic() + ORIENTATION_DEADLINE_SECONDS
     elif host.compact_event is not None and event_name == host.compact_event:

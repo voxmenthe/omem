@@ -618,6 +618,25 @@ class HostHookTest(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "")
 
+    def test_claude_hook_is_silent_for_task_notification_prompts(self) -> None:
+        # Claude Code submits a finished background task's notice as a prompt.
+        notice = (
+            "<task-notification>\n<task-id>b1</task-id>\n"
+            "<status>completed</status>\n</task-notification>"
+        )
+        result = self._hook("hook", "claude", stdin=self._turn_event(notice))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+
+        typed = self._hook(
+            "hook", "claude", stdin=self._turn_event(f"Why did this arrive? {notice}")
+        )
+        self.assertIn(
+            "CANDIDATE CUE",
+            json.loads(typed.stdout)["hookSpecificOutput"]["additionalContext"],
+        )
+
     # --- Devin edge (same JSON contract as Claude) ---------------------------
 
     def test_devin_hook_reuses_the_json_codec_and_event_mapping(self) -> None:
