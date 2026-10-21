@@ -6,11 +6,15 @@ file under the same `uuid`s and a few files re-append earlier blocks, so a
 record's `uuid` is its key across files and the first occurrence wins.
 `attachment` records, which also carry hook context, are dropped, except
 queued commands: what the user typed while the agent worked, and task
-notifications that arrived then.
+notifications that arrived then. A large tool output is recorded as a
+2 KB preview naming the file under `<session>/tool-results/` that holds it
+whole; `complete` reads that file.
 """
 
 import json
+import os
 import re
+import stat
 from pathlib import Path
 from typing import Any, Callable
 
@@ -18,12 +22,14 @@ from .. import reader
 from ..reader import Cursor, Record, read as read_records
 from . import (
     IMAGE_OMITTED,
+    TOOL_OUTPUT_CHARS,
     Expectation,
     Found,
     Head,
     HookInput,
     Listing,
     Message,
+    clip_output,
     count_unknown,
     loads,
     normalize_time,
@@ -71,6 +77,9 @@ _DROPPED = (
 _TOOL_OUTPUT = ("<bash-stdout>", "<bash-stderr>")
 _INTERRUPTED = "[Request interrupted by user"
 _NOTIFICATION = "<task-notification>"
+_SAVED = re.compile(r"<persisted-output>\n[^\n]*Full output saved to: ([^\n]+)\n")
+# Larger saved outputs are read as a head and a tail, not whole.
+SAVED_READ_BYTES = 16 * 1024 * 1024
 
 
 def discover(roots: tuple[Path, ...], listing: Listing) -> list[Found]:
@@ -338,6 +347,47 @@ def map_records(
     return messages, state
 
 
+def _session_directory(transcript: Path) -> Path:
+    if _is_subagent(transcript):
+        return next(parent.parent for parent in transcript.parents if parent.name == "subagents")
+    return transcript.parent / transcript.stem
+
+
+def _read_saved(path: str) -> str | None:
+    try:
+        # Non-blocking, so that a pipe planted there cannot stall the sync.
+        handle = open(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb")
+    except OSError:
+        return None
+    with handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        size = info.st_size
+        if size <= SAVED_READ_BYTES:
+            return clip_output(handle.read().decode("utf-8", "replace"))
+        half = TOOL_OUTPUT_CHARS // 2
+        head = handle.read(4 * half).decode("utf-8", "replace")[:half]
+        handle.seek(-4 * half, os.SEEK_END)
+        tail = handle.read().decode("utf-8", "replace")[-half:]
+    dropped = size - len(head.encode()) - len(tail.encode())
+    return f"{head}\n[... {dropped} bytes clipped ...]\n{tail}"
+
+
+def complete(transcript: Path, text: str) -> str | None:
+    """The whole output a saved-output preview stands for, clipped as any
+    tool output is, or None. Only a regular file in the transcript's own
+    session directory is read."""
+
+    match = _SAVED.match(text)
+    if match is None:
+        return None
+    allowed = os.path.realpath(_session_directory(transcript) / "tool-results")
+    if not os.path.realpath(match.group(1).strip()).startswith(allowed + os.sep):
+        return None
+    return _read_saved(match.group(1).strip())
+
+
 def hook_input(payload: dict[str, Any], event: str) -> HookInput:
     session = payload.get("session_id")
     subagent = event == "SubagentStart"
@@ -362,6 +412,7 @@ class _Claude:
     discover = staticmethod(discover)
     head = staticmethod(head)
     map = staticmethod(map_records)
+    complete = staticmethod(complete)
     hook_input = staticmethod(hook_input)
 
 

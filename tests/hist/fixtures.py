@@ -205,6 +205,13 @@ class Claude:
                         rendered=[{"content": prompt}], renderedRole="user")
 
     @staticmethod
+    def saved_output(path: Path, preview: str) -> str:
+        """A tool result's text when the host saved the whole output apart."""
+
+        return (f"<persisted-output>\nOutput too large (88.1KB). Full output saved to: {path}\n\n"
+                f"Preview (first 2KB):\n{preview}\n...\n</persisted-output>")
+
+    @staticmethod
     def metadata(kind: str, session: str, **fields: Any) -> dict[str, Any]:
         return {"type": kind, "sessionId": session, **fields}
 

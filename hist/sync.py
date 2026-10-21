@@ -18,7 +18,7 @@ import json
 import os
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from stat import S_ISLNK
 from typing import Any, Iterator
@@ -466,6 +466,11 @@ def _stop(store: Store, live: _Live, reason: str, report: Report) -> None:
     report.stopped.append(name)
 
 
+def _completed(host: Any, path: Path, message: Message) -> Message:
+    whole = host.complete(path, message.text)
+    return message if whole is None else replace(message, text=whole)
+
+
 def _ingest(store: Store, group: list[_Live], deadline: float, report: Report) -> None:
     for live in group:
         try:
@@ -486,9 +491,12 @@ def _ingest(store: Store, group: list[_Live], deadline: float, report: Report) -
             report.complete = False
             break
         live = min(open_sources, key=lambda s: s.frontier)
+        host = adapter(live.adapter)
         try:
-            records, cursor = adapter(live.adapter).reader.read(live.path, live.cursor)
-            messages, state = adapter(live.adapter).map(records, live.state)
+            records, cursor = host.reader.read(live.path, live.cursor)
+            messages, state = host.map(records, live.state)
+            if hasattr(host, "complete"):
+                messages = [_completed(host, live.path, message) for message in messages]
         except Expectation as error:
             _stop(store, live, f"adapter expectation failed: {error}", report)
             continue

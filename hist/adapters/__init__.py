@@ -115,6 +115,12 @@ class Adapter(Protocol):
     # Only hosts with a start hook (`hook.HOSTS`) define this.
     def hook_input(self, payload: dict[str, Any], event: str) -> HookInput: ...
 
+    # Only hosts that record large outputs apart from the transcript define
+    # this: the whole text a mapped message's text stands for, or None. It
+    # may read files beside the transcript, so it runs after mapping, and
+    # only for messages being indexed.
+    def complete(self, transcript: Path, text: str) -> str | None: ...
+
 
 def normalize_time(value: object, fallback: str) -> str:
     """ISO-8601 UTC with milliseconds, so times compare as strings."""
