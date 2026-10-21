@@ -37,6 +37,9 @@ For an end-to-end installation:
 5. Start a fresh session in the target repository. Confirm the agent runs
    `memory init` and `memory wake`, and that the host shows exactly one
    enabled OMem handler for each configured event (in Codex, use `/hooks`).
+6. Optionally, [give agents session history](#give-agents-session-history):
+   index existing sessions with `hist`, then merge the `hist instructions`
+   block into your global instruction files.
 
 The prompt hook supplies a canonical checkpoint plus bounded automatic
 orientation when relevant evidence is available; the compaction hook supplies
@@ -206,6 +209,32 @@ example.
 
 After installing the block, start a fresh session in the target repository and
 confirm that `memory wake` runs there.
+
+## Give agents session history
+
+The same install provides [`hist`](hist/README.md), a read-only, searchable
+record of every agent session on the machine. Memory keeps curated lessons;
+`hist` keeps the exact words, output and evidence behind them. From the `omem`
+checkout:
+
+```sh
+mkdir -p ~/.hist
+cp hist/config.example.toml ~/.hist/config.toml   # edit roots for other session locations
+hist sync --all                                   # one-time backfill; can take a while
+hist instructions                                 # the block to merge
+```
+
+- Merge the `hist instructions` block into global instruction files,
+  `~/.codex/AGENTS.md` for Codex and `~/.claude/CLAUDE.md` for Claude Code,
+  not per repository: history spans repositories.
+- The block names the usual cues for a lookup and also welcomes a short probe
+  whenever earlier work might change what the agent builds, tests, or avoids.
+  Keep it whole rather than cutting it down to the cues, and replace it after
+  upgrading, like the memory block.
+- `uv run scripts/install_hooks.py hist --apply` adds the start hook. It shows
+  the history view in the repositories listed in `view.inject` in
+  `~/.hist/config.toml`, and links shell-launched workers to the sessions that
+  started them; see [hooks](hist/README.md#install-the-hooks-optional).
 
 ## Validate a development checkout
 
