@@ -193,6 +193,40 @@ class ClassificationTest(HistCase):
             "WHERE c.native_id = 'a1234567890abcdef'").fetchone()
         self.assertEqual(sub, (sdk,))
 
+    def test_a_subagent_tasked_by_its_parent_agent_is_linked(self) -> None:
+        cwd = str(self.repo)
+        parent = "019a0000-0000-7000-8000-0000000001aa"
+        child = "019a0000-0000-7000-8000-0000000001bb"
+        spawn = {"subagent": {"thread_spawn": {"parent_thread_id": parent, "depth": 1}}}
+        write_jsonl(Codex.path(self.codex, parent), [
+            Codex.meta(parent, cwd, "cli", self.origin), Codex.user("delegate the audit", 1)])
+        write_jsonl(Codex.path(self.codex, child), [
+            Codex.meta(child, cwd, spawn, self.origin, minute=2),
+            Codex.agent_message("/root", "audit the guard", 2), Codex.assistant("audit done", 3)])
+        self.hist("sync")
+        events = [t for (t,) in self.db().execute("SELECT text FROM messages WHERE kind = 'event'")]
+        self.assertIn("worker w-000001bb started: audit the guard", events)
+
+    def test_a_child_linked_long_after_it_started_gets_no_start_note(self) -> None:
+        cwd = str(self.repo)
+        parent = "019a0000-0000-7000-8000-0000000002aa"
+        child = "019a0000-0000-7000-8000-0000000002bb"
+        spawn = {"subagent": {"thread_spawn": {"parent_thread_id": parent, "depth": 1}}}
+        later = Codex.user("two days later", 5)
+        later["timestamp"] = "2026-10-03T10:05:00.000Z"
+        write_jsonl(Codex.path(self.codex, parent), [
+            Codex.meta(parent, cwd, "cli", self.origin), Codex.user("delegate the audit", 1), later])
+        write_jsonl(Codex.path(self.codex, child), [
+            Codex.meta(child, cwd, spawn, self.origin, minute=2), Codex.user("audit the guard", 2)])
+        self.hist("sync")
+        db = self.db()
+        self.assertEqual(db.execute("SELECT count(*) FROM messages WHERE kind = 'event' AND text LIKE 'worker%'")
+                         .fetchone(), (0,))
+        self.assertEqual(db.execute(
+            "SELECT p.native_id FROM sessions c JOIN sessions p ON p.id = c.parent_id WHERE c.native_id = ?",
+            (child,)).fetchone(), (parent,))
+        self.assertEqual(db.execute("SELECT count(*) FROM links WHERE resolved = 0").fetchone(), (0,))
+
     def test_unclassified_sessions_are_stored_apart_and_listed(self) -> None:
         legacy = "019a0000-0000-7000-8000-0000000000f1"
         path = Codex.path(self.codex, legacy)

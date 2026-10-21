@@ -1,7 +1,6 @@
 """The `hist` command: bounded navigation over a shared session history."""
 
 import argparse
-import json
 import os
 import sqlite3
 import sys
@@ -118,10 +117,10 @@ def _parser() -> argparse.ArgumentParser:
 def _staleness(report: Report, store: Store) -> str:
     if report.complete:
         return ""
-    last = store.connection.execute("SELECT value FROM meta WHERE key = 'last_sync'").fetchone()
-    when = json.loads(last[0])["time"] if last else "never"
+    last = store.connection.execute("SELECT value FROM meta WHERE key = 'last_complete_sync'").fetchone()
+    when = last[0] if last else "not recorded"
     why = "another process is syncing" if report.busy else "the sync time budget ran out"
-    return f"(index may be behind: {why}; last full sync {when})\n"
+    return f"(index may be behind: {why}; last complete sync {when}; `hist sync` catches up)\n"
 
 
 def _caller(args: argparse.Namespace, config: Config) -> Caller | None:

@@ -698,7 +698,11 @@ def status(db: sqlite3.Connection, config: Config, home: Path) -> str:
         out.append("index: never synced; run `hist sync`\n")
     else:
         state = "complete" if last["complete"] else "busy" if last["busy"] else "partial (time budget)"
-        out.append(f"index: last sync {last['time']} ({state}, {last['added']} messages added)\n")
+        complete = meta.get("last_complete_sync", "not recorded")
+        out.append(
+            f"index: last sync {last['time']} ({state}, {last['added']} messages added); "
+            f"last complete sync {complete}\n"
+        )
     version = int(meta.get("text_version", "1"))
     if version < TEXT_VERSION:
         out.append(

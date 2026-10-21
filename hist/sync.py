@@ -43,6 +43,7 @@ LOCK_NAME = "sync.lock"
 LOCK_WAIT_SECONDS = 0.2
 COMMIT_BYTES = 4 * 1024 * 1024
 FOREVER = "9999"
+QUIET_LINK_SECONDS = 24 * 3600
 
 
 class StaleProgress(RuntimeError):
@@ -518,7 +519,18 @@ def _ingest(store: Store, group: list[_Live], deadline: float, report: Report) -
     _commit(store, group, report)
 
 
+def _shifted(stamp: str, seconds: int) -> str:
+    epoch = calendar.timegm(time.strptime(stamp[:19], "%Y-%m-%dT%H:%M:%S"))
+    return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(epoch + seconds))
+
+
 def _resolve_links(store: Store) -> None:
+    """Attach each worker or subagent to the session that started it, and
+    note its start at the end of that session's timeline. A child that
+    started `QUIET_LINK_SECONDS` or more before the timeline's latest
+    message is attached without a note: the note would land long after
+    the fact, and many at once would flood the timeline's view."""
+
     with store.write() as db:
         rows = db.execute(
             "SELECT child_adapter, child_native, parent_adapter, parent_native, via "
@@ -526,7 +538,7 @@ def _resolve_links(store: Store) -> None:
         ).fetchall()
         for child_adapter, child_native, parent_adapter, parent_native, via in rows:
             child = db.execute(
-                "SELECT id, alias, class, timeline_id FROM sessions WHERE adapter = ? AND native_id = ?",
+                "SELECT id, alias, class, started FROM sessions WHERE adapter = ? AND native_id = ?",
                 (child_adapter, child_native),
             ).fetchone()
             parent = db.execute(
@@ -536,15 +548,27 @@ def _resolve_links(store: Store) -> None:
             ).fetchone()
             if child is None or parent is None:
                 continue
-            child_id, alias, klass, _ = child
+            child_id, alias, klass, started = child
             if klass not in ("worker", "subagent"):
                 db.execute(
                     "UPDATE links SET resolved = 1 WHERE child_adapter = ? AND child_native = ?",
                     (child_adapter, child_native),
                 )
                 continue
+            parent_id, parent_timeline = parent
+            length, latest = db.execute(
+                "SELECT length, last_time FROM timelines WHERE id = ?", (parent_timeline,)
+            ).fetchone()
+            if latest is not None and started < _shifted(latest, -QUIET_LINK_SECONDS):
+                db.execute("UPDATE sessions SET parent_id = ? WHERE id = ?", (parent_id, child_id))
+                db.execute(
+                    "UPDATE links SET resolved = 1 WHERE child_adapter = ? AND child_native = ?",
+                    (child_adapter, child_native),
+                )
+                continue
+            # A Codex subagent's task arrives as a message from its parent agent.
             task = db.execute(
-                "SELECT text FROM messages WHERE session_id = ? AND kind = 'user' "
+                "SELECT text FROM messages WHERE session_id = ? AND kind IN ('user', 'work') "
                 "ORDER BY position LIMIT 1",
                 (child_id,),
             ).fetchone()
@@ -553,11 +577,7 @@ def _resolve_links(store: Store) -> None:
             source = db.execute(
                 "SELECT id FROM sources WHERE session_id = ? ORDER BY id LIMIT 1", (child_id,)
             ).fetchone()
-            parent_id, parent_timeline = parent
             db.execute("UPDATE sessions SET parent_id = ? WHERE id = ?", (parent_id, child_id))
-            length, = db.execute(
-                "SELECT length FROM timelines WHERE id = ?", (parent_timeline,)
-            ).fetchone()
             now = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
             text = redact(f"worker w-{alias} started: {' '.join(task[0].split())[:200]}")
             inserted = db.execute(
@@ -701,6 +721,10 @@ def _sync_locked(
             db.execute(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_sync', ?)",
                 (json.dumps({"time": utc_now(), **report.to_json()}),),
+            )
+        if report.complete:
+            db.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_complete_sync', ?)", (utc_now(),)
             )
 
 
