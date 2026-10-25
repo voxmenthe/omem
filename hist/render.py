@@ -7,6 +7,7 @@ other node shows an outline, marked `~`: a preview from its first user and
 last agent message, frequent tools, and its span. Outlines are lossy.
 """
 
+import re
 import sqlite3
 from dataclasses import dataclass
 
@@ -25,6 +26,8 @@ _KIND_LABEL = {
     "event": "event",
 }
 _MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+_COMMAND_NAME = re.compile(r"<command-name>\s*/?([^<]*?)\s*</command-name>")
+_COMMAND_ARGS = re.compile(r"<command-args>([\s\S]*?)(?:</command-args>|\Z)")
 
 
 @dataclass(frozen=True)
@@ -49,12 +52,26 @@ def flat(text: str) -> str:
     return " ".join(text.split())
 
 
+def _prompt(text: str) -> str:
+    """A user message as typed: Claude Code's slash-command markup becomes `/name args`."""
+
+    name = _COMMAND_NAME.search(text)
+    if name is None:
+        return text
+    args = _COMMAND_ARGS.search(text)
+    return f"/{name.group(1)} {args.group(1) if args else ''}".strip()
+
+
 def kind_label(kind: str, tool: str | None) -> str:
     label = _KIND_LABEL[kind]
     return f"{label} {tool}" if tool and kind != "event" else label
 
 
-def message_line(alias: str, label: str, kind: str, tool: str | None, text: str) -> str:
+def message_line(
+    alias: str, label: str, kind: str, tool: str | None, text: str, preview: bool = False
+) -> str:
+    if preview and kind == "user":
+        text = _prompt(text)
     return f"[s:{alias} {label}] {kind_label(kind, tool)}: {flat(text)}"
 
 
@@ -112,13 +129,16 @@ class Renderer:
             f"BETWEEN ? AND ? ORDER BY position {order} LIMIT 1",
             (self.timeline.id, kind, start, end),
         ).fetchone()
-        return None if row is None else clip_line(flat(row[0]), EXCERPT_BYTES)
+        if row is None:
+            return None
+        text = _prompt(row[0]) if kind == "user" else row[0]
+        return clip_line(flat(text), EXCERPT_BYTES)
 
     def outline(self, node: Node) -> str:
         start, end = node.start, node.last
         if node.level == 0:
             row = self._rows(start, end)[0]
-            return "~ " + clip_line(message_line(*row), LINE_BYTES - 2)
+            return "~ " + clip_line(message_line(*row, preview=True), LINE_BYTES - 2)
         pieces = []
         first_user = self._excerpt("user", start, end, newest=False)
         last_agent = self._excerpt("agent", start, end, newest=True)
@@ -128,7 +148,7 @@ class Renderer:
             pieces.append(f'agent: "{last_agent}"')
         if not pieces:
             first = self._rows(start, start)[0]
-            pieces.append(clip_line(message_line(*first), EXCERPT_BYTES * 2))
+            pieces.append(clip_line(message_line(*first, preview=True), EXCERPT_BYTES * 2))
         tools = self.db.execute(
             "SELECT tool, count(*) AS n FROM messages WHERE timeline_id = ? AND kind = 'tool_call' "
             "AND position BETWEEN ? AND ? GROUP BY tool ORDER BY n DESC, tool LIMIT 3",

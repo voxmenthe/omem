@@ -228,3 +228,38 @@ class DigestTest(HistCase):
         self.assertEqual(len(out.splitlines()), 2)
         # The page query, then the first prompts and last reply of each session.
         self.assertEqual(len(statements), 1 + 2 * 2, statements)
+
+
+class SlashCommandPreviewTest(HistCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.hist("status")
+        self.session = "7c000000-0000-4000-8000-0000000000b1"
+        self.markup = ("<command-message>intent</command-message>\n<command-name>/intent</command-name>\n"
+                       "<command-args>foo</command-args>")
+        cwd = str(self.repo)
+        write_jsonl(Claude.project(self.claude, cwd) / f"{self.session}.jsonl", [
+            Claude.user("u1", self.session, cwd, self.markup, 1),
+            Claude.assistant("u2", self.session, cwd, [Claude.text("done" + "x" * 600)], 2),
+            Claude.assistant("u3", self.session, cwd, [Claude.text("finished")], 3),
+        ])
+        self.hist("sync")
+
+    def test_slash_commands_decode_only_in_clipped_previews(self) -> None:
+        alias = self.session[-8:]
+        preview = self.hist("read", alias).stdout
+        self.assertIn("] user: /intent foo\n", preview)
+        self.assertNotIn("<command-name>", preview)
+
+        position, stored = self.db().execute(
+            "SELECT position, text FROM messages WHERE kind = 'user'"
+        ).fetchone()
+        self.assertEqual(stored, self.markup)
+        whole = self.hist("zoom", f"proj:{position}").stdout
+        self.assertTrue(whole.endswith("\n" + self.markup + "\n"), whole)
+
+        found = self.hist("find", "command-name", "--session", alias).stdout
+        header, hit, outline = found.splitlines()
+        self.assertEqual(header, "1 hit, newest first")
+        self.assertIn("<command-name>/intent</command-name>", hit)
+        self.assertIn('~ user: "/intent foo"', outline)

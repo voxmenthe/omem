@@ -13,7 +13,7 @@ from pathlib import Path
 from .caller import Caller
 from .config import Config
 from .registry import lookup_directory
-from .render import Renderer, Timeline, clip_line, flat, kind_label, message_line, span
+from .render import Renderer, Timeline, _prompt, clip_line, flat, kind_label, message_line, span
 from .store import TEXT_VERSION, database_bytes, search_text
 from .tree import LINE_BYTES, ViewBudgetError, compute_view, node_at
 
@@ -516,8 +516,6 @@ def _session_rows(
     ).fetchall()
 
 
-_COMMAND_NAME = re.compile(r"<command-name>\s*/?([^<]*?)\s*</command-name>")
-_COMMAND_ARGS = re.compile(r"<command-args>([\s\S]*?)(?:</command-args>|\Z)")
 # First prompts that say little about the session (flopwire's list).
 _WEAK = (
     "continue", "go on", "go ahead", "keep going", "proceed", "resume", "carry on", "yes", "ok",
@@ -525,16 +523,6 @@ _WEAK = (
     "exception", "```", "{", "[", "<", "$ ", "> ", "at ", "npm err", "diff --git", "--- ", "+++ ",
 )
 DIGEST_PROMPTS = 5
-
-
-def _prompt(text: str) -> str:
-    """A user message as typed: Claude Code's slash-command markup becomes `/name args`."""
-
-    name = _COMMAND_NAME.search(text)
-    if name is None:
-        return text
-    args = _COMMAND_ARGS.search(text)
-    return f"/{name.group(1)} {args.group(1) if args else ''}".strip()
 
 
 def _weak(prompt: str) -> bool:
@@ -649,7 +637,7 @@ def read(
 
     def line(position: int, kind: str, tool: str | None, text: str) -> str:
         return f"{timeline.ref_name}:{position}+1|" + clip_line(
-            message_line(str(alias), session_label, kind, tool, text)
+            message_line(str(alias), session_label, kind, tool, text, preview=True)
         ) + "\n"
 
     if tail is not None:
