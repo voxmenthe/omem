@@ -248,6 +248,17 @@ class ConsolidationTest(unittest.TestCase):
         new, due = consolidation_due(self.store)
         self.assertEqual((new, due), (0, False))
 
+    def test_missing_dispositions_are_reported_in_full(self) -> None:
+        for index in range(7):
+            self._observe(f"candidate {index}")
+        bundle = request_consolidation(self.store)
+        with self.assertRaises(ConsolidationError) as raised:
+            apply_consolidation(bundle["request_id"], self._result(bundle))
+        self.assertIn(
+            "7 offered observations lack a disposition: [0, 1, 2, 3, 4, 5, 6]",
+            str(raised.exception),
+        )
+
     def test_every_offered_observation_needs_exactly_one_disposition(self) -> None:
         first, second = self._observe("one"), self._observe("two")
         bundle = request_consolidation(self.store)

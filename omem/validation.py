@@ -191,7 +191,7 @@ def validate_result(
     missing = [source_id for source_id in offered_ids if source_id not in accounted]
     if missing:
         raise ConsolidationError(
-            f"offered observations lack a disposition: {missing[:5]}"
+            f"{len(missing)} offered observations lack a disposition: {missing}"
         )
 
     retired = tuple(parse_retired(raw) for raw in result["retired"])
