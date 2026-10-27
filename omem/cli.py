@@ -235,10 +235,12 @@ Consolidation protocol:
 
   review_recommended=yes also surfaces an initial catalog or new evidence
   waiting seven days. These invite judgment, not automatic promotion. A
-  request offers at most 48 deferred records, least-reviewed first, and gives
-  the rest of the 256 slots to new evidence; unoffered deferred records carry
-  forward unchanged. Do not repeatedly review unchanged deferred evidence
-  without a new reason.
+  request offers at most 48 deferred records from the front of a queue and
+  gives the rest of the 256 slots to new evidence. Apply carries unoffered
+  records forward unchanged and queues each record it defers again at the
+  back, so every deferred record is offered in turn. Decide each offered
+  deferred record on its evidence; deferring it again needs a reason specific
+  to that record.
 
   Judge recurrence by independent occasions, not repeated narration of one
   incident. Weigh source authority, contextual agreement, durability, and
@@ -284,7 +286,9 @@ Optional pruning and storage policy:
   never copies, merges, relabels, or deletes data; it only changes which
   namespace is active. Inferred-staleness and capacity retirement of
   still-valid items happen only under a profile other than off (the default is
-  conservative); capacity retirement additionally requires target pressure, and
+  conservative); capacity retirement additionally requires target pressure (the
+  result's items plus its capacity retirements exceed the target, so a full
+  catalog can swap one still-valid item for a promotion), and
   age or review counts never act as automatic deletion rules. A malformed
   config blocks consolidation requests and applies and is visible in `memory
   status`; invalid storage configuration blocks store access entirely instead

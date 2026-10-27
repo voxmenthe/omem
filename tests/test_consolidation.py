@@ -684,6 +684,33 @@ class ConsolidationTest(unittest.TestCase):
             len(bundle["observations"]), MAX_OFFERED_OBSERVATIONS - DEFERRED_REVIEW_SLICE
         )
 
+    def test_new_deferrals_never_starve_the_records_already_reviewed(self) -> None:
+        backlog = DEFERRED_REVIEW_SLICE + 20
+        for index in range(backlog):
+            self._observe(f"lesson {index}")
+        initial = request_consolidation(self.store)
+        apply_consolidation(initial["request_id"], self._result(
+            initial, deferred=[{"source_id": index, "reason": "needs context"}
+                               for index in range(backlog)]
+        ))
+        offers = dict.fromkeys(range(backlog), 0)
+        for round_number in range(5):
+            # A full slice of new deferrals each round, all reviewed once.
+            for index in range(DEFERRED_REVIEW_SLICE):
+                self._observe(f"new {round_number}.{index}")
+            bundle = request_consolidation(self.store)
+            offered = [entry["source_id"] for entry in bundle["deferred"]]
+            for source_id in offered:
+                if source_id in offers:
+                    offers[source_id] += 1
+            apply_consolidation(bundle["request_id"], self._result(bundle, deferred=[
+                {"source_id": source_id, "reason": "still needs context"}
+                for source_id in offered + [entry["id"] for entry in bundle["observations"]]
+            ]))
+        self.assertEqual(
+            [source_id for source_id, count in offers.items() if count < 2], []
+        )
+
     def test_item_budget_is_a_hard_ceiling(self) -> None:
         for index in range(ITEM_BUDGET["self"] + 1):
             self._observe(f"lesson {index}")

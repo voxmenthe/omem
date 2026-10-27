@@ -539,12 +539,14 @@ model:
    observations those items cite, selected deferred candidates with apply-derived
    review history, and the next contiguous batch of new observations. At most
    256 candidate observations are offered per request, so total history can
-   grow without bound. At most 48 of them are deferred candidates, those with
-   the fewest prior reviews first, so the agent can judge each one; new
-   evidence gets the remaining slots. Each review raises a record's count, so
-   the slice rotates through the backlog. Unoffered deferred records carry
-   forward unchanged, including their review counts. The full catalog and its
-   cited evidence are additional input to this bound.
+   grow without bound. At most 48 of them are deferred candidates, few enough
+   that the agent can judge each one; new evidence gets the remaining slots.
+   The deferred records form a queue: a request offers its front, and apply
+   queues each record it defers again at the back, so with D deferred records
+   each is offered within ⌈D ÷ 48⌉ requests however much new evidence arrives.
+   Unoffered deferred records carry forward unchanged, including their review
+   counts. The full catalog and its cited evidence are additional input to this
+   bound.
 2. Send the model's JSON result to `memory consolidate apply <request-id>`
    through standard input.
 
@@ -612,8 +614,10 @@ Three cleanup decisions stay separate:
   evidence. An unresolved conflict leaves no active item.
 - **Inferred-staleness retirement** of a still-valid item needs a pruning
   profile other than `off` and affirmative item-specific evidence.
-- **Capacity retirement** additionally requires the active catalog to exceed
-  its configured target.
+- **Capacity retirement** additionally requires target pressure: the result's
+  items plus its capacity retirements exceed the configured target. A full
+  catalog therefore can admit a promotion by retiring one still-valid item by
+  capacity.
 
 One optional root config file controls this —
 `$MEMORY_V0_DIR/config.toml` (or `~/.memory-v0/config.toml`):
@@ -640,7 +644,7 @@ limits; older binaries reject those larger catalogs. Existing generations and
 retained version-1 requests remain readable by the updated implementation.
 
 An absent file, section, or key takes the values shown: `conservative` with
-32/48 targets. Under `conservative`, a catalog over its target can admit a new
+32/48 targets. Under `conservative`, a catalog at its target can admit a new
 lesson by retiring a still-valid item only on clear item-specific evidence
 (effective redundancy, newly cheap recoverability, or strongly diminished
 decision value). Under `off`, only safety retirement is possible, so a full

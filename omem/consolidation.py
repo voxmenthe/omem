@@ -102,13 +102,18 @@ CONSOLIDATION_INSTRUCTIONS = (
     "Keep each item focused on one decision condition; do not bundle "
     "unrelated lessons to save slots. "
     "Unoffered deferred candidates are carried forward unchanged by apply. "
+    "Decide each offered deferred candidate on its evidence; deferring it again "
+    "needs a reason specific to that candidate. "
     "Review every base item: retain it unchanged or retire it "
     "once with a bounded reason. Safety retirement of contradicted, superseded, "
     "inapplicable, or misleading items is mandatory under every profile, and an "
     "unresolved conflict leaves no active item. Apply the pruning profile only "
     "to still-valid items under its evidence rules; capacity retirement "
-    "additionally requires catalog target pressure. Emit the smallest "
-    "decision-useful set. Account for every offered observation exactly once: "
+    "additionally requires catalog target pressure, which exists when the "
+    "result's items plus its capacity retirements exceed the target, so a full "
+    "catalog can admit a promotion by retiring one still-valid item by capacity. "
+    "Emit the smallest decision-useful set. Account for every offered "
+    "observation exactly once: "
     "cited by one item, deferred, or rejected."
 )
 
@@ -159,9 +164,9 @@ def build_request(
     total = layout.observations_path.stat().st_size // OBSERVATION_RECORD_BYTES
     if total < checkpoint:
         raise ConsolidationError("observation log is shorter than the reviewed checkpoint")
-    # Review less-seen candidates first; each review raises a count, so the
-    # slice rotates through the backlog.
-    deferred_records.sort(key=lambda record: (record.review_count, record.source_id))
+    # The base's deferred list is a queue: offer its front, and apply puts what
+    # it defers again at the back, so each record waits at most one pass per
+    # slice ahead of it, however many new deferrals arrive.
     deferred_records = deferred_records[:DEFERRED_REVIEW_SLICE]
     advance = min(total - checkpoint, MAX_OFFERED_OBSERVATIONS - len(deferred_records))
     deferred: list[dict[str, Any]] = []
@@ -442,7 +447,7 @@ def _enrich_validated_result(
         for record in prior_deferred.values()
         if record.source_id not in offered_deferred
     ]
-    for source_id in deferred_ids:
+    for source_id in sorted(deferred_ids):
         reason = next(
             entry["reason"] for entry in result["deferred"] if entry["source_id"] == source_id
         )
@@ -455,7 +460,6 @@ def _enrich_validated_result(
                 "review_count": prior.review_count + 1 if prior else 1,
             }
         )
-    deferred_records.sort(key=lambda record: record["source_id"])
     citation_digests = {}
     for item in items:
         for source_id in item.source_ids:
