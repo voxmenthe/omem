@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from omem.consolidation import request_consolidation
+from omem.consolidation import DEFERRED_REVIEW_SLICE, request_consolidation
 from omem.dreams import DreamError, apply_dream, request_dream
 from omem.generations import load_current_generation
 from omem.layout import scope_path
@@ -293,7 +293,7 @@ class MigrationTest(unittest.TestCase):
         bundle = request_migration(self.store)
         self.assertEqual(bundle["source_count"], total)
         self.assertFalse(bundle["headroom_required"])
-        self.assertEqual(len(bundle["deferred"]), 252)
+        self.assertEqual(len(bundle["deferred"]), DEFERRED_REVIEW_SLICE)
         message = apply_migration(
             bundle["request_id"],
             _result(

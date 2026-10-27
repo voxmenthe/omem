@@ -539,11 +539,12 @@ model:
    observations those items cite, selected deferred candidates with apply-derived
    review history, and the next contiguous batch of new observations. At most
    256 candidate observations are offered per request, so total history can
-   grow without bound. Up to 64 slots are reserved for new evidence when a
-   backlog competes with it; unused slots go to other candidates. Deferred
-   candidates with fewer prior reviews are offered first. Unoffered deferred
-   records carry forward unchanged, including their review counts. The full
-   catalog and its cited evidence are additional input to this bound.
+   grow without bound. At most 48 of them are deferred candidates, those with
+   the fewest prior reviews first, so the agent can judge each one; new
+   evidence gets the remaining slots. Each review raises a record's count, so
+   the slice rotates through the backlog. Unoffered deferred records carry
+   forward unchanged, including their review counts. The full catalog and its
+   cited evidence are additional input to this bound.
 2. Send the model's JSON result to `memory consolidate apply <request-id>`
    through standard input.
 

@@ -62,7 +62,8 @@ from .validation import observation_index, validate_result
 
 CONSOLIDATION_PROTOCOL = "memory-consolidation-request"
 MAX_OFFERED_OBSERVATIONS = 256
-NEW_OBSERVATION_RESERVE = 64
+# Small enough that an agent can judge each offered deferred record.
+DEFERRED_REVIEW_SLICE = 48
 ROUTINE_DUE_OBSERVATIONS = 12
 SPARSE_REVIEW_AGE_SECONDS = 7 * 86400
 
@@ -153,13 +154,11 @@ def build_request(
     total = layout.observations_path.stat().st_size // OBSERVATION_RECORD_BYTES
     if total < checkpoint:
         raise ConsolidationError("observation log is shorter than the reviewed checkpoint")
-    room = max(
-        NEW_OBSERVATION_RESERVE, MAX_OFFERED_OBSERVATIONS - len(deferred_records)
-    )
-    advance = min(total - checkpoint, room)
-    # Review less-seen candidates first; new evidence always gets bounded room.
+    # Review less-seen candidates first; each review raises a count, so the
+    # slice rotates through the backlog.
     deferred_records.sort(key=lambda record: (record.review_count, record.source_id))
-    deferred_records = deferred_records[: MAX_OFFERED_OBSERVATIONS - advance]
+    deferred_records = deferred_records[:DEFERRED_REVIEW_SLICE]
+    advance = min(total - checkpoint, MAX_OFFERED_OBSERVATIONS - len(deferred_records))
     deferred: list[dict[str, Any]] = []
     for record in deferred_records:
         observation = observations_at(

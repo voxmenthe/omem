@@ -234,10 +234,11 @@ Consolidation protocol:
   `memory consolidate apply <request-id>`.
 
   review_recommended=yes also surfaces an initial catalog or new evidence
-  waiting seven days. These invite judgment, not automatic promotion. When a
-  backlog competes with new observations, up to 64 of the 256 slots are reserved
-  for new evidence; unoffered deferred records carry forward unchanged. Do not
-  repeatedly review unchanged deferred evidence without a new reason.
+  waiting seven days. These invite judgment, not automatic promotion. A
+  request offers at most 48 deferred records, least-reviewed first, and gives
+  the rest of the 256 slots to new evidence; unoffered deferred records carry
+  forward unchanged. Do not repeatedly review unchanged deferred evidence
+  without a new reason.
 
   Judge recurrence by independent occasions, not repeated narration of one
   incident. Weigh source authority, contextual agreement, durability, and

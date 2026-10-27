@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from omem.consolidation import (
+    DEFERRED_REVIEW_SLICE,
     MAX_OFFERED_OBSERVATIONS,
     ROUTINE_DUE_OBSERVATIONS,
     apply_consolidation,
@@ -632,35 +633,56 @@ class ConsolidationTest(unittest.TestCase):
         second_bundle = request_consolidation(self.store)
         self.assertEqual(len(second_bundle["observations"]), 30)
 
-    def test_saturated_deferred_backlog_preserves_unoffered_records_and_advances(self) -> None:
-        for index in range(MAX_OFFERED_OBSERVATIONS):
+    def test_deferred_backlog_is_offered_as_a_bounded_rotating_slice(self) -> None:
+        backlog = DEFERRED_REVIEW_SLICE + 20
+        for index in range(backlog):
             self._observe(f"lesson {index}")
         initial = request_consolidation(self.store)
         before = apply_consolidation(initial["request_id"], self._result(
             initial, deferred=[{"source_id": index, "reason": "needs context"}
-                               for index in range(MAX_OFFERED_OBSERVATIONS)]
+                               for index in range(backlog)]
         ))
         self._observe("new resolving correction", provenance="user")
         bundle = request_consolidation(self.store)
-        self.assertEqual([item["id"] for item in bundle["observations"]], [256])
-        self.assertEqual(len(bundle["deferred"]), 255)
+        self.assertEqual([item["id"] for item in bundle["observations"]], [backlog])
+        self.assertEqual(
+            [entry["source_id"] for entry in bundle["deferred"]],
+            list(range(DEFERRED_REVIEW_SLICE)),
+        )
         self.assertFalse(bundle["headroom_required"])
         reviewed = {entry["source_id"] for entry in bundle["deferred"]}
         result = self._result(bundle, deferred=[
             {"source_id": entry["source_id"], "reason": "still needs context"}
             for entry in bundle["deferred"]
-        ] + [{"source_id": 256, "reason": "requires comparison"}])
+        ] + [{"source_id": backlog, "reason": "requires comparison"}])
         after = apply_consolidation(bundle["request_id"], result)
-        self.assertEqual(after.source_count, 257)
-        self.assertEqual(len(after.deferred), 257)
+        self.assertEqual(after.source_count, backlog + 1)
+        self.assertEqual(len(after.deferred), backlog + 1)
         carried = [record for record in before.deferred if record.source_id not in reviewed]
         self.assertEqual([record for record in after.deferred if record.source_id in {r.source_id for r in carried}], carried)
         self.assertEqual(apply_consolidation(bundle["request_id"], result), after)
         next_bundle = request_consolidation(self.store)
-        self.assertEqual(len(next_bundle["deferred"]), 256)
-        self.assertTrue({record.source_id for record in carried}.issubset(
-            {entry["source_id"] for entry in next_bundle["deferred"]}
+        offered_next = [entry["source_id"] for entry in next_bundle["deferred"]]
+        self.assertEqual(len(offered_next), DEFERRED_REVIEW_SLICE)
+        self.assertEqual(offered_next[:20], [record.source_id for record in carried])
+        self.assertTrue(reviewed.isdisjoint(offered_next[:20]))
+
+    def test_a_large_new_batch_gets_the_room_the_deferred_slice_leaves(self) -> None:
+        backlog = DEFERRED_REVIEW_SLICE + 20
+        for index in range(backlog):
+            self._observe(f"lesson {index}")
+        initial = request_consolidation(self.store)
+        apply_consolidation(initial["request_id"], self._result(
+            initial, deferred=[{"source_id": index, "reason": "needs context"}
+                               for index in range(backlog)]
         ))
+        for index in range(MAX_OFFERED_OBSERVATIONS):
+            self._observe(f"new {index}")
+        bundle = request_consolidation(self.store)
+        self.assertEqual(len(bundle["deferred"]), DEFERRED_REVIEW_SLICE)
+        self.assertEqual(
+            len(bundle["observations"]), MAX_OFFERED_OBSERVATIONS - DEFERRED_REVIEW_SLICE
+        )
 
     def test_item_budget_is_a_hard_ceiling(self) -> None:
         for index in range(ITEM_BUDGET["self"] + 1):
