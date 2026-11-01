@@ -13,7 +13,6 @@ from tests.hist.fixtures import (
     protobuf,
     write_jsonl,
 )
-from hist.adapters import TEXT_PART_CHARS
 
 TYPED = "cc000000-0000-4000-8000-0000000000a1"
 PRINTED = "cc000000-0000-4000-8000-0000000000b2"
@@ -340,10 +339,10 @@ class MarkerLinkTest(InstalledCase):
                                            OpenCode.idle(3)])
         devin = Devin(self.devin)
         self.addCleanup(devin.close)
-        # The marker straddles the boundary between the task's stored parts.
-        long_task = "audit the guard " + "x" * (TEXT_PART_CHARS - 26) + " " + marker + "\n\nDelegate task id: a1"
-        self.assertLess(long_task.index(marker), TEXT_PART_CHARS)
-        self.assertGreater(long_task.index(marker) + len(marker), TEXT_PART_CHARS)
+        # The marker straddles the 30,000th character, where earlier versions split a long task into parts.
+        long_task = "audit the guard " + "x" * (30_000 - 26) + " " + marker + "\n\nDelegate task id: a1"
+        self.assertLess(long_task.index(marker), 30_000)
+        self.assertGreater(long_task.index(marker) + len(marker), 30_000)
         devin.session("devin-worker-0000d3", self.cwd)
         devin.add("devin-worker-0000d3", [(0, None, devin.prompt(0)), (1, 0, devin.user(long_task, 2))])
         antigravity = Antigravity(self.antigravity)

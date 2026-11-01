@@ -20,7 +20,6 @@ Kind = Literal["user", "agent", "tool_call", "tool_result", "work", "event"]
 SessionClass = Literal["interactive", "worker", "subagent", "maintenance", "unclassified"]
 
 TOOL_OUTPUT_CHARS = 30_000
-TEXT_PART_CHARS = 30_000
 IMAGE_OMITTED = "[image omitted]"
 
 
@@ -164,26 +163,23 @@ def parts(
     text: str,
     key: str | None,
 ) -> list[Message]:
-    """One message, or consecutive parts when non-tool-output text is long."""
+    """The one message for `text`: whole, or for tool output its head and tail.
 
-    if kind == "tool_result":
-        chunks = [clip_output(text)]
-    else:
-        chunks = [
-            text[k : k + TEXT_PART_CHARS] for k in range(0, len(text), TEXT_PART_CHARS)
-        ] or [""]
+    History indexed by earlier versions holds text over 30,000 characters in
+    consecutive parts of its record; those rows and their positions stay.
+    """
+
     return [
         Message(
             record,
-            first_part + n,
+            first_part,
             time,
             turn,
             kind,
             tool,
-            chunk,
-            None if key is None else f"{key}#{first_part + n}",
+            clip_output(text) if kind == "tool_result" else text,
+            None if key is None else f"{key}#{first_part}",
         )
-        for n, chunk in enumerate(chunks)
     ]
 
 

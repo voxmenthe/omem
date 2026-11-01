@@ -164,6 +164,20 @@ class ReadTest(HistCase):
         self.assertIn("] user: audit the guard", lines[0])
         self.assertEqual(self.answers(lines[1:]), list(range(ROUNDS)))
 
+    def test_a_long_answer_is_one_message_selected_and_zoomed_whole(self) -> None:
+        # Longer than the 30,000 characters earlier versions stored in parts.
+        native = thread(3001)
+        answer = "".join(f"final {k:05d} " for k in range(4000))
+        write_jsonl(Codex.path(self.codex, native), [
+            Codex.meta(native, str(self.repo), "exec", self.origin), Codex.user("summarize", 1),
+            Codex.assistant("progress", 2), Codex.assistant(answer, 3),
+        ])
+        self.hist("sync")
+        (line,) = self.hist("read", native[-8:], "--tail", "1", "--kind", "agent").stdout.splitlines()
+        self.assertIn("] agent: final 00000 final 00001", line)
+        pages = self.walk("zoom", line.split("+", 1)[0], limit=PAGE_BYTES + 200)
+        self.assertEqual("".join("\n".join(page[1:]) for page in pages), answer)
+
     def test_a_tail_from_the_timeline_start_reads_the_rest_from_the_start(self) -> None:
         lines = self.hist("read", self.alias, "--tail", "1000").stdout.splitlines()
         total = 2 + 3 * ROUNDS

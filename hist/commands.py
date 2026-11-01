@@ -31,8 +31,26 @@ _REF = re.compile(
 )
 _TIMELINE_COLUMNS = "id, name, kind, display, length, repo_identity"
 # `human` is not stored: it is a `user` message in an interactive session, so it
-# leaves out the tasks agents write for workers and subagents.
+# leaves out the tasks agents write for workers and subagents, less what a host
+# delivers in the user's turn on another's behalf: another Claude session's teammate
+# message, another Codex thread's delegation, and an automation's heartbeat.
 HUMAN = "human"
+_INJECTED = (
+    "Another Claude session sent a message:\n<teammate-message ",
+    "<codex_delegation>",
+    "<heartbeat>",
+)
+# History indexed before whole messages holds long text in parts of one record, so a
+# later part is judged by the record's first.
+_HUMAN_SQL = (
+    "(m.kind = 'user' AND x.class = 'interactive' AND NOT EXISTS (SELECT 1 FROM messages h "
+    "WHERE h.source_id = m.source_id AND h.record = m.record AND h.part <= m.part AND ("
+    + " OR ".join(
+        f"substr(ltrim(h.text, char(9, 10, 13, 32)), 1, {len(prefix)}) = '{prefix}'"
+        for prefix in _INJECTED
+    )
+    + ")))"
+)
 # `--kind` takes the labels lines print and the stored names.
 _KINDS = {
     "user": "user", "agent": "agent", "tool": "tool_call", "tool_call": "tool_call",
@@ -345,7 +363,7 @@ def _kind_clause(kinds: tuple[str, ...]) -> tuple[str, list[object]]:
     stored = [kind for kind in kinds if kind != HUMAN]
     parts = [f"m.kind IN ({','.join('?' * len(stored))})"] if stored else []
     if HUMAN in kinds and "user" not in stored:
-        parts.append("(m.kind = 'user' AND x.class = 'interactive')")
+        parts.append(_HUMAN_SQL)
     return f"({' OR '.join(parts)})", list(stored)
 
 
@@ -624,16 +642,9 @@ def read(
     timeline = _timeline(
         db, db.execute(f"SELECT {_TIMELINE_COLUMNS} FROM timelines WHERE id = ?", (timeline_id,)).fetchone()
     )
-    session_label, session_class = db.execute(
-        "SELECT label, class FROM sessions WHERE id = ?", (session_id,)
-    ).fetchone()
-    wanted = tuple(dict.fromkeys(
-        "user" if kind == HUMAN else kind
-        for kind in named if kind != HUMAN or session_class == "interactive"
-    ))
-    if named and not wanted:
-        return "no messages\n"
-    kept = f" AND m.kind IN ({', '.join('?' * len(wanted))})" if wanted else ""
+    (session_label,) = db.execute("SELECT label FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    clause, wanted = _kind_clause(named) if named else ("", [])
+    kept = f" AND {clause}" if clause else ""
 
     def line(position: int, kind: str, tool: str | None, text: str) -> str:
         return f"{timeline.ref_name}:{position}+1|" + clip_line(
@@ -643,7 +654,8 @@ def read(
     if tail is not None:
         count, first = db.execute(
             "SELECT count(*), min(position) FROM (SELECT m.position FROM messages m "
-            f"WHERE m.session_id = ?{kept} ORDER BY m.position DESC LIMIT ?)",
+            f"JOIN sessions x ON x.id = m.session_id WHERE m.session_id = ?{kept} "
+            "ORDER BY m.position DESC LIMIT ?)",
             (session_id, *wanted, tail),
         ).fetchone()
         if not count:
@@ -651,7 +663,8 @@ def read(
         newest: list[str] = []
         used = 0
         for row in db.execute(
-            "SELECT m.position, m.kind, m.tool, m.text FROM messages m WHERE m.session_id = ? "
+            "SELECT m.position, m.kind, m.tool, m.text FROM messages m "
+            "JOIN sessions x ON x.id = m.session_id WHERE m.session_id = ? "
             f"AND m.position >= ?{kept} ORDER BY m.position DESC LIMIT 400",
             (session_id, first, *wanted),
         ):
@@ -674,7 +687,8 @@ def read(
             raise UsageError(f"--after must be a reference in {timeline.name}")
         start = position
     rows = db.execute(
-        "SELECT m.position, m.kind, m.tool, m.text FROM messages m WHERE m.session_id = ? "
+        "SELECT m.position, m.kind, m.tool, m.text FROM messages m "
+        "JOIN sessions x ON x.id = m.session_id WHERE m.session_id = ? "
         f"AND m.position > ?{kept} ORDER BY m.position LIMIT 400",
         (session_id, start, *wanted),
     ).fetchall()

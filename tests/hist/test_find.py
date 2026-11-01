@@ -112,6 +112,54 @@ class FindTest(HistCase):
         self.assertIn("zebra in another session", own)
         self.assertNotIn("zebra reply", own)
 
+    def test_human_leaves_out_messages_injected_in_the_users_turn(self) -> None:
+        cwd = str(self.repo)
+        teammate = (
+            "Another Claude session sent a message:\n<teammate-message teammate_id=\"lane-a\" color=\"blue\">\n"
+            '{"type":"idle_notification","failureReason":"zebra limit"}\n</teammate-message>\n\n'
+            "This came from another Claude session — not typed by your user."
+        )
+        quoting = "why does every Another Claude session sent a message: zebra notice count as mine?"
+        write_jsonl(Claude.project(self.claude, cwd) / f"{SESSION}.jsonl", [
+            Claude.user("u3", SESSION, cwd, teammate, 32),
+            Claude.user("u4", SESSION, cwd, quoting, 33),
+        ])
+        write_jsonl(Codex.path(self.codex, OTHER), [
+            Codex.user("<codex_delegation>\n  <input>zebra coordination only</input>\n</codex_delegation>", 23),
+            Codex.user("<heartbeat>\n  <instructions>continue the zebra goal</instructions>\n</heartbeat>", 24),
+        ])
+        self.hist("sync")
+        humans = "\n".join(hits(self.hist("find", "zebra", "--all", "--include-self", "--kind", "human").stdout))
+        self.assertIn("count as mine", humans)
+        self.assertIn("zebra in another session", humans)
+        for injected in ("teammate-message", "codex_delegation", "heartbeat"):
+            self.assertNotIn(injected, humans)
+        users = "\n".join(hits(self.hist("find", "zebra", "--all", "--include-self", "--kind", "user").stdout))
+        self.assertIn("teammate-message", users)
+        # History indexed before whole messages stored a long one in parts: a later part of the teammate's
+        # record carries none of its wrapper. Make the owner's next message such a part.
+        continuation = "zebra continued from the teammate's long report"
+        write_jsonl(Claude.project(self.claude, cwd) / f"{SESSION}.jsonl", [
+            Claude.user("u5", SESSION, cwd, continuation, 34),
+        ])
+        self.hist("sync")
+        db = self.db()
+        with db:
+            ((source, record),) = db.execute(
+                "SELECT source_id, record FROM messages WHERE text LIKE 'Another Claude session%'").fetchall()
+            db.execute("UPDATE messages SET record = ?, part = 1 WHERE source_id = ? AND text = ?",
+                       (record, source, continuation))
+        self.assertNotIn(continuation, self.hist("find", "zebra", "--all", "--include-self", "--kind", "human").stdout)
+        self.assertNotIn(continuation, self.hist("read", SESSION[-8:], "--kind", "human").stdout)
+        for session, kept, injected in ((SESSION[-8:], "count as mine", "teammate-message"),
+                                        (OTHER[-8:], "zebra in another session", "codex_delegation")):
+            for flags in ((), ("--tail", "3")):
+                with self.subTest(session=session, flags=flags):
+                    own = self.hist("read", session, "--kind", "human", *flags).stdout
+                    self.assertIn(kept, own)
+                    self.assertNotIn(injected, own)
+                    self.assertNotIn("heartbeat", own)
+
     def test_continuations_repeat_the_filters(self) -> None:
         for n in range(12):
             write_jsonl(Codex.path(self.codex, OTHER), [Codex.user(f"zebra again {n}", 22)])

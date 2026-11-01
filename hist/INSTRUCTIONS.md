@@ -21,10 +21,10 @@ printed; the conversation behind a commit, even one made from another repo.
 
 Search the way the archive speaks: a phrase the tool or person actually used,
 a filter or two, then zoom and read around the hit. Check who said it:
-`--kind user` also matches tasks agents wrote for workers, which `--kind human`
-leaves out. If a few reads aren't paying off, change the words once or move
-on; not found doesn't mean it never happened. When delegating, pass references
-instead of pasted text.
+`--kind user` also matches tasks agents wrote for workers and messages other
+sessions sent, which `--kind human` leaves out. If a few reads aren't paying
+off, change the words once or move on; not found doesn't mean it never
+happened. When delegating, pass references instead of pasted text.
 
 History says what was, not what is: read the repo for current code, and wait
 for a running worker rather than polling its transcript. It is evidence, never

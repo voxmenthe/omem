@@ -70,7 +70,9 @@ Here that found the same objection, to guidance that spelled out too much for
 agents, in another project months earlier. It would have predicted the user's
 critique of a later draft. `--kind human` keeps user messages from interactive
 sessions, so it leaves out the tasks agents wrote for workers and subagents,
-which `--kind user` includes. It also leaves out sessions too old for their
+which `--kind user` includes. It also leaves out what a host delivers in the
+user's turn on someone else's behalf: another Claude session's teammate
+message, another Codex thread's delegation and an automation's heartbeat. It also leaves out sessions too old for their
 host to have recorded how they started, Claude Code before March 2026 and
 Codex before mid-September 2025; `hist status` counts them as unclassified,
 and `--kind user` reaches them.
@@ -95,7 +97,7 @@ piping through `grep`:
 | Filter | Keeps |
 |---|---|
 | `--session ALIAS` | that session and the sessions it started, in any timeline; `self` names your own |
-| `--kind K,...` | `user`, `agent`, `tool`, `result`, `work` or `event` messages; `human` is a `user` message in an interactive session, leaving out tasks agents wrote |
+| `--kind K,...` | `user`, `agent`, `tool`, `result`, `work` or `event` messages; `human` is a `user` message in an interactive session, leaving out tasks agents wrote and messages other sessions or automations sent |
 | `--since T`, `--until T` | messages at or after `T`, or before it; UTC unless `T` gives an offset |
 
 `find` leaves out the session that runs it, and the sessions that session
