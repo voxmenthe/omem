@@ -1,7 +1,7 @@
 # hist
 
-`hist` indexes every Codex, Claude Code, Command Code, OpenCode, Devin, and
-Antigravity CLI session on this machine into one SQLite store and lets agents navigate it with short, bounded commands. Sessions
+`hist` indexes every Codex, Claude Code, Command Code, OpenCode, Devin,
+Antigravity CLI, and Kimi Code session on this machine into one SQLite store and lets agents navigate it with short, bounded commands. Sessions
 in one repository share a timeline across hosts and accounts; workers and
 subagents get their own linked timelines. It is read-only history: agents never
 write it, and it never changes OMem.
@@ -45,7 +45,7 @@ transcript locations; `hist` reads no host environment variables to find them.
 The parser rejects unknown keys and overlapping roots. Keys:
 
 - `[[sources]]`: one per host installation or account, with `adapter`
-  (`codex`, `claude`, `commandcode`, `opencode`, `devin`, or `antigravity`), a
+  (`codex`, `claude`, `commandcode`, `opencode`, `devin`, `antigravity`, or `kimi`), a
   `label` shown in message headers, and `roots`.
 - `[discovery]`: `watch` patterns are scanned only to report unclaimed session
   stores in `hist status`; `exclude` lists paths or repositories never indexed.
@@ -66,7 +66,8 @@ transcript on the machine (32,483 sources, 35 GB, 2.75 million messages) took
 
 Command Code, OpenCode, Devin, and the Antigravity CLI have no start hook, so
 their sessions are indexed and searchable but are never shown the view or the
-worker header. A subagent links to the session that started it on the same
+worker header. Kimi Code has no start hook either; its prompt hook shows the
+view on a session's first prompt ([Install the hooks](#install-the-hooks-optional)). A subagent links to the session that started it on the same
 host; a worker started from another host's shell is linked only when its
 launcher writes a [marker line](#link-workers-by-a-marker-line). Each
 adapter's docstring in `hist/adapters/` describes its store.
@@ -92,6 +93,21 @@ adapter's docstring in `hist/adapters/` describes its store.
   with `-p`. Results of the older, specific tool steps (view file, run command,
   ...) are counted in `hist status`, not indexed; the calls are. The
   Antigravity IDE's store, `~/.gemini/antigravity`, is not read.
+- Kimi Code (`~/.kimi-code`, and any other homes, such as the per-repository
+  ones launchers keep in `~/.kimi-code-state`): each directory holding
+  `sessions/`, up to four levels below a root, is a home, and each agent's
+  `wire.jsonl` is one source. Agents other than `main` are subagents of the
+  agent that started them. A session is interactive when one of its prompts is
+  in the home's typed-prompt history or Kimi gave it a title, and a worker
+  once its first turn ends or it has been idle an hour; until then
+  `hist status` counts it as not yet classified. A fork skips the records it
+  copied from its source and begins with a `forked from` event; a fork with no
+  typed prompt is unclassified. Hook output, skill bodies, and skills the model
+  loads are not stored; a slash skill is stored as `/skill:<name> <args>`. Output too
+  large for the journal is read from the agent's `tool-results/` or `tasks/`.
+  Kimi rewrites a protocol 1.4 journal when it resumes that session, which
+  stops the session's source: what was indexed stays, and its later messages
+  are not indexed.
 
 ### Link workers by a marker line
 
@@ -269,6 +285,17 @@ copy of each changed file. Run it once per Codex home. To merge by hand:
 - Claude Code: merge the `hooks` entries of
   [`integrations/claude.json`](integrations/claude.json) into
   `~/.claude/settings.json` without replacing existing entries.
+- Kimi Code (by hand only): append [`integrations/kimi.toml`](integrations/kimi.toml)
+  to `~/.kimi-code/config.toml`, and to the `config.toml` of any other home
+  that should get the view; a home without it still has its sessions indexed.
+  Kimi has no start hook, so this `UserPromptSubmit` hook prints the view, or a
+  worker's header, on a session's first prompt only: not on later prompts or
+  steers, not after compaction, and not for a resumed session hist already
+  indexed. A marker file per session under `$HIST_HOME/hook-state/kimi` records
+  the first prompt. A Kimi session started from a Claude Code or Codex
+  session's shell is linked to that session by the process tree, since Kimi
+  exports no session id. To end inside Kimi's timeout, the hook gives `ps`,
+  `lsof`, and `git` 1.5 s in all; a walk cut short records no link.
 
 Either way, Codex then reports "Hooks need review" at its next start in each
 Codex home, and the hooks do not run until you trust them there or in `/hooks`.

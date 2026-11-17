@@ -37,6 +37,11 @@ adapter = "antigravity"
 label = "antigravity"
 roots = ["~/.gemini/antigravity-cli"]
 
+[[sources]]                        # Kimi Code: each home holding sessions/, up to four levels down
+adapter = "kimi"
+label = "kimi"
+roots = ["~/.kimi-code"]           # add homes kept elsewhere, such as "~/.kimi-code-state"
+
 [discovery]
 # Scanned only to report session stores that no source claims.
 watch = ["~/.codex*", "~/.claude*", "~/.commandcode*", "~/.kimi*", "~/.grok*", "~/.local/share/opencode", "~/.gemini/antigravity"]

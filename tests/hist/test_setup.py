@@ -11,6 +11,7 @@ from tests.hist.fixtures import (
     CommandCode,
     Devin,
     HistCase,
+    Kimi,
     OpenCode,
     write_jsonl,
 )
@@ -46,10 +47,13 @@ class NewUserTest(HistCase):
         antigravity.conversation(A4, cwd)
         antigravity.add(A4, [Antigravity.user("antigravity: and now?", 7)])
         antigravity.finish(A4)
+        kimi = Kimi.session_id()
+        Kimi.write_state(self.kimi, cwd, kimi, title="And now?")
+        write_jsonl(Kimi.journal(self.kimi, cwd, kimi), [Kimi.metadata(), Kimi.prompt("kimi: and now?", 8)])
         home = {"HOME": str(self.base)}
         self.hist("sync", "--all", env=home)
         status = self.hist("status", env=home).stdout
-        for label in ("codex", "claude", "commandcode", "opencode", "devin", "antigravity"):
+        for label in ("codex", "claude", "commandcode", "opencode", "devin", "antigravity", "kimi"):
             self.assertIn(f"{label} ({label}): 1 indexed", status)
 
     def test_the_example_configuration_flags_each_unread_store_once(self) -> None:
@@ -60,6 +64,13 @@ class NewUserTest(HistCase):
         status = self.hist("status", env={"HOME": str(self.base)}).stdout
         self.assertEqual(re.findall(r"unclaimed: (\S+) holds sessions", status),
                          [str(self.base / ".grok"), str(self.base / ".grok2")])
+
+    def test_the_kimi_hook_uses_only_the_fields_kimi_accepts(self) -> None:
+        import tomllib
+
+        config = tomllib.loads((REPO_ROOT / "hist" / "integrations" / "kimi.toml").read_text(encoding="utf-8"))
+        self.assertEqual(config, {"hooks": [
+            {"event": "UserPromptSubmit", "command": "hist hook kimi UserPromptSubmit", "timeout": 3}]})
 
     def test_instructions_print_the_packaged_block_before_any_configuration(self) -> None:
         (self.home / "config.toml").unlink()

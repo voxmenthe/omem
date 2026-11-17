@@ -148,8 +148,9 @@ automatically, and so are OpenCode and Antigravity subagents. A worker started
 from a shell is linked when its launcher names the parent: by exporting
 `HIST_PARENT` for a Claude Code worker, or on any host by ending its task with
 a `[hist-parent …]` line ([README.md](README.md#link-workers-by-a-marker-line)).
-The start note in the parent's timeline then says `started (marker)`. Other
-workers are recorded but not linked, and Kimi and Grok sessions are not
+The start note in the parent's timeline then says `started (marker)`. A Kimi
+Code session started from a Claude Code or Codex shell is linked by its prompt
+hook. Other workers are recorded but not linked, and Grok sessions are not
 recorded.
 
 ### Audit or replay a session
