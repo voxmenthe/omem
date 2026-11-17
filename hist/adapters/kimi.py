@@ -6,10 +6,11 @@ make under `~/.kimi-code-state`. Each agent's journal is one source. `main`
 is the session, `session_<uuid>` as Kimi's hooks name it; every other agent
 is a subagent, `session_<uuid>/<agent>`, whose parent `state.json` names.
 
-Content comes from `turn.prompt`, `turn.steer`, and loop events. The
-`agent.message.appended` and `context.append_message` records repeat them
-or hold the host's own context. Kimi's own rules mark injected prompt parts:
-a `meta.source`, or the skill bodies an `origin.skillActivations` stands for.
+Content comes from `turn.prompt`, `turn.steer`, and loop events, and from
+the `context.append_message` records of a shell command the user runs; the
+rest of those, and `agent.message.appended`, repeat a prompt or hold the
+host's own context. Kimi's own rules mark injected prompt parts: a
+`meta.source`, or the skill bodies an `origin.skillActivations` stands for.
 
 A main session is interactive when one of its prompts is a line of the
 home's typed-prompt history, or when it has a title and is not a fork; a
@@ -71,7 +72,7 @@ _IGNORED = frozenset(
         "plan_mode.exit", "swarm_mode.enter", "swarm_mode.exit", "turn.cancel",
         "runtime.set_binding", "environment.set_binding", "profile.bind",
         "agent.message.appended", "agent.turn.started", "agent.turn.ended",
-        "context.append_message", "context.apply_compaction", "full_compaction.begin",
+        "context.apply_compaction", "full_compaction.begin",
         "plugin.session_start", "mcp.tools_discovered", "token_counting.measured",
         "token_counting.turn_recorded", "token_counting.rebased", "prompt.accepted",
         "prompt.steered", "prompt.aborted", "prompt.completed", "changeNotifier.snapshot",
@@ -86,6 +87,8 @@ _IGNORED = frozenset(
 _IGNORED_LOOP = frozenset({"step.begin"})
 # Prompt origins besides the user's own, and the kind each is indexed as.
 _ORIGINS = {"system_trigger": "event", "task": "event", "background_task": "event"}
+# Origins of a slash command: the user's when Kimi's trigger is user-slash.
+_SLASH = frozenset({"skill_activation", "plugin_command"})
 _MEDIA = {"image_url": IMAGE_OMITTED, "audio_url": "[audio omitted]", "video_url": "[video omitted]"}
 _ENDS = frozenset({"completed", "failed", "cancelled"})
 # The forms of a tool result whose output Kimi saved whole (renderPersistedToolResult
@@ -230,14 +233,21 @@ def _source(part: dict[str, Any]) -> str | None:
 
 
 def _slash(origin: dict[str, Any]) -> str | None:
-    """A slash-activated skill as typed: `/skill:<name> <args>`, from the origin's fields."""
+    """A slash command as typed, from the origin's fields and never the body
+    Kimi expanded: `/skill:<name> <args>`, or `/<plugin>:<command> <args>`."""
 
-    name = origin.get("skillName")
-    if not isinstance(name, str) or not name:
-        return None
-    args = origin.get("skillArgs")
+    if origin.get("kind") == "plugin_command":
+        plugin, command, args = origin.get("pluginId"), origin.get("commandName"), origin.get("commandArgs")
+        if not isinstance(plugin, str) or not plugin:
+            return None
+        name = f"{plugin}:{command}" if isinstance(command, str) and command else plugin
+    else:
+        skill, args = origin.get("skillName"), origin.get("skillArgs")
+        if not isinstance(skill, str) or not skill:
+            return None
+        name = f"skill:{skill}"
     args = args.strip() if isinstance(args, str) else ""
-    return f"/skill:{name} {args}" if args else f"/skill:{name}"
+    return f"/{name} {args}" if args else f"/{name}"
 
 
 def _typed_prompt(value: dict[str, Any]) -> str | None:
@@ -246,7 +256,7 @@ def _typed_prompt(value: dict[str, Any]) -> str | None:
     origin = value.get("origin") if isinstance(value.get("origin"), dict) else {}
     if origin.get("kind") == "user":
         return _input_text(value.get("input"), origin, None) or None
-    if origin.get("kind") == "skill_activation" and origin.get("trigger") == "user-slash":
+    if _name(origin.get("kind")) in _SLASH and origin.get("trigger") == "user-slash":
         return _slash(origin)
     return None
 
@@ -407,6 +417,26 @@ def _result_text(output: object) -> str:
     return "\n".join(pieces)
 
 
+def _shell(value: dict[str, Any]) -> list[tuple[str, str | None, str, str | None]]:
+    """A command the user ran from the prompt, or its output; any other
+    appended message mirrors a prompt or is the host's own reminder."""
+
+    message = value.get("message") if isinstance(value.get("message"), dict) else {}
+    origin = message.get("origin") if isinstance(message.get("origin"), dict) else {}
+    if origin.get("kind") != "shell_command" or not isinstance(message.get("content"), list):
+        return []
+    text = _unescape(_result_text(message["content"]))
+    if origin.get("phase") == "input":
+        return [("user", None, text, None)]
+    return [("tool_result", "bash", text, None)] if origin.get("phase") == "output" else []
+
+
+def _unescape(text: str) -> str:
+    """Undo Kimi's escapeXml, which a shell command and its output pass through."""
+
+    return text.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"').replace("&amp;", "&")
+
+
 def _key(prefix: str, value: object) -> str | None:
     return f"kimi:{prefix}:{value}" if isinstance(value, str) and value else None
 
@@ -419,13 +449,13 @@ def _prompt(value: dict[str, Any], state: dict[str, Any]) -> list[tuple[str, str
     if kind == "user":
         text = _input_text(value.get("input"), origin, state)
         return [("user", None, text, key)] if text else []
-    if kind == "skill_activation":
+    if kind in _SLASH:
         # Kimi's own rule for input a person sees as theirs (isVisibleWireTurnInput).
         if origin.get("trigger") != "user-slash":
             return []
         command = _slash(origin)
         if command is None:
-            count_unknown(state, "skill_activation without a skill name")
+            count_unknown(state, f"{kind} without a name")
             return []
         return [("user", None, command, key)]
     if kind not in _ORIGINS:
@@ -458,12 +488,14 @@ def _loop(event: dict[str, Any], state: dict[str, Any]) -> list[tuple[str, str |
             calls[call] = name
             if len(calls) > 256:
                 calls.pop(next(iter(calls)))
-        return [("tool_call", name, json.dumps(event.get("args"), ensure_ascii=False), _key("call", call))]
+        # A model's provider names its calls, and Kimi keeps the names unique only within one
+        # conversation (createToolCallIdNormalizer), so a call keys nothing across the store.
+        return [("tool_call", name, json.dumps(event.get("args"), ensure_ascii=False), None)]
     if kind == "tool.result":
         call = event.get("toolCallId")
         name = calls.pop(call, None) if isinstance(call, str) else None
         result = event.get("result") if isinstance(event.get("result"), dict) else {}
-        return [("tool_result", name, _result_text(result.get("output")), _key("result", call))]
+        return [("tool_result", name, _result_text(result.get("output")), None)]
     if kind == "step.end":
         if event.get("finishReason") == "error":
             return [("event", None, "the model step failed", None)]
@@ -492,6 +524,8 @@ def _record(value: dict[str, Any], state: dict[str, Any]) -> list[tuple[str, str
         return []
     if record_type == "full_compaction.complete":
         return [("event", None, "context compacted", None)]
+    if record_type == "context.append_message":
+        return _shell(value)
     if record_type not in _IGNORED:
         count_unknown(state, f"type:{record_type}")
     return []
@@ -551,7 +585,10 @@ def complete(transcript: Path, text: str) -> str | None:
     agent = os.path.realpath(transcript.parent)
     if not any(saved.startswith(f"{agent}/{name}/") for name in ("tool-results", "tasks")):
         return None
-    return read_saved(saved)
+    whole = read_saved(saved)
+    # The file holds only the text; media the result carried stay as their placeholders.
+    media = [line for line in text.split("\n") if line in _MEDIA.values()]
+    return None if whole is None else "\n".join([whole, *media])
 
 
 def hook_input(payload: dict[str, Any], event: str) -> HookInput:

@@ -608,6 +608,13 @@ class Kimi:
                 "time": epoch_ms(minute)}
 
     @staticmethod
+    def appended(text: str, minute: int, origin: dict[str, Any]) -> dict[str, Any]:
+        """A message Kimi added to the agent's context, as it does for a shell command the user runs."""
+
+        return {"type": "context.append_message", "agentId": "main", "time": epoch_ms(minute), "message": {
+            "role": "user", "content": [{"type": "text", "text": text}], "toolCalls": [], "origin": origin}}
+
+    @staticmethod
     def forked(agent: str, minute: int) -> dict[str, Any]:
         return {"type": "forked", "agentId": agent, "time": epoch_ms(minute)}
 
