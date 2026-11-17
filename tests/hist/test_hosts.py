@@ -490,10 +490,7 @@ class KimiTest(InstalledCase):
             Kimi.appended("<bash-stdout>1: a &amp; b\n</bash-stdout><bash-stderr></bash-stderr>", 1,
                           {"kind": "shell_command", "phase": "output"}),
             Kimi.appended("MIRRORED-PROMPT", 2, {"kind": "user"}),
-            {**Kimi.appended("<system>The user has imported context from notes.md.</system>", 2, {"kind": "user"}),
-             "message": {"role": "user", "toolCalls": [], "origin": {"kind": "user"}, "content": [
-                 {"type": "text", "text": "<system>The user has imported context from notes.md.</system>"},
-                 {"type": "text", "text": '<imported_context source="notes.md">\nIMPORTED\n</imported_context>'}]}},
+            Kimi.imported("notes.md", "IMPORTED", 2),
             Kimi.prompt("EXPANDED-PLUGIN-BODY", 3, origin={
                 "kind": "plugin_command", "pluginId": "review", "commandName": "diff", "commandArgs": "HEAD~1 ",
                 "trigger": "user-slash", "activationId": "a-1"}),
@@ -507,6 +504,28 @@ class KimiTest(InstalledCase):
             ("event", "import", '<imported_context source="notes.md">\nIMPORTED\n</imported_context>'),
             ("user", None, "/review:diff HEAD~1"),
         ])
+
+    def test_a_forked_subagent_skips_the_history_it_inherited(self) -> None:
+        agents = {"main": {"type": "main"}, "agent-0": {"type": "sub", "labels": {"parentAgentId": "main"}}}
+        history = [
+            Kimi.appended("<bash-input>\nls\n</bash-input>", 1, {"kind": "shell_command", "phase": "input"}),
+            Kimi.appended("<bash-stdout>a.py</bash-stdout><bash-stderr></bash-stderr>", 1,
+                          {"kind": "shell_command", "phase": "output"}),
+            Kimi.imported("notes.md", "IMPORTED", 1),
+        ]
+        main = self.session([*history, Kimi.prompt("split it", 2), Kimi.ended(3)], agents=agents)
+        # Kimi seeds a forked agent with its parent's history, as appends with no `forked` record.
+        write_jsonl(Kimi.journal(self.kimi, self.cwd, main, "agent-0"), [
+            Kimi.metadata(), *history, Kimi.appended("split it", 2, {"kind": "user"}),
+            Kimi.prompt("the forked task", 3, origin={"kind": "system_trigger", "name": "subagent"}),
+            Kimi.appended("<bash-input>\npwd\n</bash-input>", 4, {"kind": "shell_command", "phase": "input"}),
+        ])
+        self.hist("sync")
+        self.assertEqual(self.texts(f"{main}/agent-0"), [
+            ("work", "subagent", "the forked task"), ("user", None, "<bash-input>\npwd\n</bash-input>")])
+        self.assertEqual([text for _, _, text in self.texts(main)][:3], [
+            "<bash-input>\nls\n</bash-input>", "<bash-stdout>a.py</bash-stdout><bash-stderr></bash-stderr>",
+            '<imported_context source="notes.md">\nIMPORTED\n</imported_context>'])
 
     def test_prompts_keep_what_the_user_typed_and_drop_what_the_host_added(self) -> None:
         skill = {"activationId": "a1", "skillName": "audit", "skillArgs": "the guard"}

@@ -376,6 +376,8 @@ def head(path: Path, locate: Callable[[str], Path | None]) -> Head | None:
         "state": head_state,
     }
     if agent != "main":
+        # A forked subagent's journal begins with its parent's history (settleContext "fork").
+        head_state["inherits"] = True
         parent_agent = _parent_agent(meta)
         parent = None
         if parent_agent is not None:
@@ -512,6 +514,7 @@ def _loop(event: dict[str, Any], state: dict[str, Any]) -> list[Mapped]:
 def _record(value: dict[str, Any], state: dict[str, Any]) -> list[Mapped]:
     record_type = _name(value.get("type"))
     if record_type in ("turn.prompt", "turn.steer"):
+        state["prompted"] = True
         return _prompt(value, state)
     if record_type == "context.append_loop_event":
         event = value.get("event")
@@ -529,7 +532,8 @@ def _record(value: dict[str, Any], state: dict[str, Any]) -> list[Mapped]:
     if record_type == "full_compaction.complete":
         return [("event", None, "context compacted")]
     if record_type == "context.append_message":
-        return _appended(value)
+        # Until a subagent's first prompt, an append is history it inherited.
+        return [] if state.get("inherits") and not state.get("prompted") else _appended(value)
     if record_type not in _IGNORED:
         count_unknown(state, f"type:{record_type}")
     return []

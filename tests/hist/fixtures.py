@@ -614,6 +614,16 @@ class Kimi:
         return {"type": "context.append_message", "agentId": "main", "time": epoch_ms(minute), "message": {
             "role": "user", "content": [{"type": "text", "text": text}], "toolCalls": [], "origin": origin}}
 
+    @classmethod
+    def imported(cls, source: str, content: str, minute: int) -> dict[str, Any]:
+        """Context imported into the session (Kimi's buildImportContextMessage)."""
+
+        record = cls.appended(f"<system>The user has imported context from {source}.</system>", minute,
+                              {"kind": "user"})
+        record["message"]["content"].append(
+            {"type": "text", "text": f'<imported_context source="{source}">\n{content}\n</imported_context>'})
+        return record
+
     @staticmethod
     def forked(agent: str, minute: int) -> dict[str, Any]:
         return {"type": "forked", "agentId": agent, "time": epoch_ms(minute)}
