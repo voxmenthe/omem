@@ -7,7 +7,7 @@ import shlex
 import unittest
 from pathlib import Path
 
-from hist.caller import Caller, detect
+from hist.caller import Caller, bounded, detect, direct_parent
 from hist.config import Source
 from hist.store import search_text
 from tests.hist.fixtures import Claude, Codex, HistCase, write_jsonl
@@ -234,3 +234,52 @@ class DetectTest(unittest.TestCase):
         self.assertEqual(self.detect(table, {"CLAUDE_CODE_SESSION_ID": "c"}), Caller("claude", "c", "claude-env"))
         self.assertIsNone(self.detect(table, {"CLAUDE_CODE_SESSION_ID": "c", "CODEX_THREAD_ID": "t"}))
         self.assertIsNone(self.detect(table, {}))
+
+    def test_kimi_identifies_nobody_and_stops_the_walk(self) -> None:
+        # Kimi exports no session id, so the variables it inherits name whoever launched it.
+        environ = {"CODEX_THREAD_ID": "t-1", "CLAUDE_CODE_SESSION_ID": "c"}
+        for name in ("/Users/x/.kimi-code/bin/kimi", "kimi-code"):
+            table = {10: (11, "/bin/sh"), 11: (12, name), 12: (1, "codex")}
+            self.assertIsNone(self.detect(table, environ), name)
+
+    def test_a_kimi_parent_is_the_next_host_up_unless_it_is_another_kimi(self) -> None:
+        def parent(table: dict[int, tuple[int, str]], environ: dict[str, str]) -> Caller | None:
+            return direct_parent(self.sources, "kimi", pid=10, environ=environ, process=table.get,
+                                 open_files=lambda pid: [])
+
+        under_codex = {10: (11, "/bin/sh"), 11: (12, "kimi"), 12: (13, "/bin/zsh"), 13: (1, "codex")}
+        self.assertEqual(parent(under_codex, {"CODEX_THREAD_ID": "t-1"}), Caller("codex", "t-1", "codex-env"))
+        self.assertIsNone(parent(under_codex, {}))
+        # Codex, then Kimi A, then Kimi B: B's inherited thread names Codex, not A.
+        nested = {10: (11, "kimi"), 11: (12, "kimi-code"), 12: (1, "codex")}
+        self.assertIsNone(parent(nested, {"CODEX_THREAD_ID": "t-1"}))
+        # Kimi alone, or no Kimi at all: the environment never decides.
+        self.assertIsNone(parent({10: (11, "kimi"), 11: (1, "/bin/zsh")}, {"CLAUDE_CODE_SESSION_ID": "c"}))
+        self.assertIsNone(parent({10: (11, "/bin/sh"), 11: (1, "codex")}, {"CODEX_THREAD_ID": "t-1"}))
+
+    def test_a_bounded_walk_shares_one_deadline_and_past_it_names_nobody(self) -> None:
+        table = {10: (11, "/bin/sh"), 11: (12, "kimi"), 12: (13, "/bin/zsh"), 13: (1, "codex")}
+        rollout = "/h/.codex/sessions/rollout-x-019a0000-0000-7000-8000-000000000001.jsonl"
+
+        def walk(seconds: float) -> tuple[Caller | None, list[tuple[str, int, float]]]:
+            now, given = [0.0], []
+
+            def slow(name: str, answer):  # each call takes 0.3 s of the budget
+                def call(pid: int, timeout: float):
+                    given.append((name, pid, round(timeout, 6)))
+                    now[0] += 0.3
+                    return answer(pid)
+                return call
+
+            process, open_files = bounded(seconds, process=slow("ps", table.get),  # the clock starts at 0
+                                          open_files=slow("lsof", lambda pid: [rollout]), clock=lambda: now[0])
+            return direct_parent(self.sources, "kimi", pid=10, environ={}, process=process,
+                                 open_files=open_files), given
+
+        found, given = walk(10)
+        self.assertEqual(found, Caller("codex", "019a0000-0000-7000-8000-000000000001", "codex-rollout"))
+        self.assertEqual([timeout for _, _, timeout in given], [10, 9.7, 9.4, 9.1, 8.8])
+        # The fourth ps leaves 0.1 s of a 1 s budget; lsof is not run, and nobody is named.
+        found, given = walk(1)
+        self.assertIsNone(found)
+        self.assertEqual(given, [("ps", 10, 1), ("ps", 11, 0.7), ("ps", 12, 0.4), ("ps", 13, 0.1)])
