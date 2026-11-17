@@ -280,7 +280,9 @@ def main(host: str, event: str, home: Path) -> int:
             print(context if codec == "text" else json.dumps(
                 {"hookSpecificOutput": {"hookEventName": event, "additionalContext": context}},
                 ensure_ascii=False, separators=(",", ":"),
-            ))
+            ), flush=True)
         except (BrokenPipeError, OSError):
-            pass
+            # The reader is gone. What is left in the buffer goes nowhere, so the
+            # interpreter's own flush at exit cannot fail and exit with status 120.
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
     return 0

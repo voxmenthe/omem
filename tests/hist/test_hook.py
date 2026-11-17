@@ -355,6 +355,18 @@ class KimiPromptTest(HistCase):
         self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
         self.assertTrue(self.marker(KIMI))
 
+    def test_a_reader_gone_before_the_view_still_exits_zero(self) -> None:
+        reader, writer = os.pipe()
+        os.close(reader)
+        try:
+            result = subprocess.run([sys.executable, "-m", "hist", "hook", "kimi", "UserPromptSubmit"],
+                                    cwd=self.repo, env=self.environment(), input=self.payload(KIMI),
+                                    stdout=writer, stderr=subprocess.PIPE, text=True, timeout=60)
+        finally:
+            os.close(writer)
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+        self.assertTrue(self.marker(KIMI))
+
     def test_concurrent_first_prompts_of_one_session_print_one_view(self) -> None:
         runs = [subprocess.Popen([sys.executable, "-m", "hist", "hook", "kimi", "UserPromptSubmit"],
                                  cwd=self.repo, env=self.environment(), stdin=subprocess.PIPE,
