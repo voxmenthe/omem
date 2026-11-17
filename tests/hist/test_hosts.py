@@ -483,13 +483,17 @@ class KimiTest(InstalledCase):
             "WHERE m.text LIKE '%COPIED-%' AND s.native_id NOT LIKE ?", (f"{source}%",)).fetchall()
         self.assertEqual(copied, [])
 
-    def test_a_shell_command_and_a_plugin_command_are_kept_as_the_user_typed_them(self) -> None:
+    def test_shell_and_plugin_commands_are_kept_as_typed_and_imported_context_as_an_event(self) -> None:
         native = self.session([
             Kimi.appended("<bash-input>\ngrep -n &quot;a &amp; b&quot; x\n</bash-input>", 1,
                           {"kind": "shell_command", "phase": "input"}),
             Kimi.appended("<bash-stdout>1: a &amp; b\n</bash-stdout><bash-stderr></bash-stderr>", 1,
                           {"kind": "shell_command", "phase": "output"}),
             Kimi.appended("MIRRORED-PROMPT", 2, {"kind": "user"}),
+            {**Kimi.appended("<system>The user has imported context from notes.md.</system>", 2, {"kind": "user"}),
+             "message": {"role": "user", "toolCalls": [], "origin": {"kind": "user"}, "content": [
+                 {"type": "text", "text": "<system>The user has imported context from notes.md.</system>"},
+                 {"type": "text", "text": '<imported_context source="notes.md">\nIMPORTED\n</imported_context>'}]}},
             Kimi.prompt("EXPANDED-PLUGIN-BODY", 3, origin={
                 "kind": "plugin_command", "pluginId": "review", "commandName": "diff", "commandArgs": "HEAD~1 ",
                 "trigger": "user-slash", "activationId": "a-1"}),
@@ -500,6 +504,7 @@ class KimiTest(InstalledCase):
         self.assertEqual(self.texts(native), [
             ("user", None, '<bash-input>\ngrep -n "a & b" x\n</bash-input>'),
             ("tool_result", "bash", "<bash-stdout>1: a & b\n</bash-stdout><bash-stderr></bash-stderr>"),
+            ("event", "import", '<imported_context source="notes.md">\nIMPORTED\n</imported_context>'),
             ("user", None, "/review:diff HEAD~1"),
         ])
 
@@ -542,7 +547,7 @@ class KimiTest(InstalledCase):
             ("user", None, "/skill:docs"),
             ("agent", None, "on it"),
             ("tool_call", "Bash", '{"command": "ls ü"}'),
-            ("tool_result", "Bash", "a.py\n[image omitted]"),
+            ("tool_result", "Bash", "[image omitted]\na.py"),
             ("event", None, "the model step failed"),
             ("event", "task", "task t1 finished"),
             ("event", "background_task", "background job done"),
@@ -554,29 +559,25 @@ class KimiTest(InstalledCase):
             self.assertNotStored(marker)
         self.assertNotIn("unknown record types", self.hist("status").stdout)
 
-    def test_kimis_ids_key_messages_and_a_tool_calls_id_keys_nothing(self) -> None:
+    def test_no_message_is_keyed_so_an_id_used_twice_keeps_both_messages(self) -> None:
+        # A provider chooses call ids and an SDK caller may choose prompt ids; neither is unique.
         agents = {"main": {"type": "main"}, "agent-0": {"type": "sub", "labels": {"parentAgentId": "main"}}}
-        calls = [Kimi.call("Read", {"path": "a"}, "tool_9", 4), Kimi.result("tool_9", "contents", 4)]
-        native = self.session([
-            Kimi.prompt("again", 1, prompt_id=None), Kimi.prompt("again", 2, prompt_id=None),
-            Kimi.prompt("keyed", 3, prompt_id="msg_1"),
-            Kimi.reply("same", 3, uuid=None), Kimi.reply("same", 3, uuid=None),
-            *calls, Kimi.prompt("steered", 5, steer=True, prompt_id="msg_2"),
-        ], title="Keys", agents=agents)
-        # The provider's call ids repeat in another session and in a sibling agent.
-        write_jsonl(Kimi.journal(self.kimi, self.cwd, native, "agent-0"), [Kimi.metadata(), *calls])
-        other = self.session(calls, title="Other")
+        records = [Kimi.prompt("a task", 1, prompt_id="request-1"), Kimi.reply("same", 2, uuid="part-1"),
+                   Kimi.call("Read", {"path": "a"}, "tool_9", 3), Kimi.result("tool_9", "contents", 3),
+                   Kimi.prompt("steered", 4, steer=True, prompt_id="msg_2")]
+        native = self.session([*records, Kimi.prompt("again", 5, prompt_id="request-1")], title="Keys",
+                              agents=agents)
+        write_jsonl(Kimi.journal(self.kimi, self.cwd, native, "agent-0"), [Kimi.metadata(), *records])
+        other = self.session(records, title="Other")
         self.hist("sync")
-        rows = self.db().execute(
-            "SELECT text, key FROM messages m JOIN sessions s ON s.id = m.session_id "
-            "WHERE s.native_id = ? AND m.record >= 0 ORDER BY position", (native,)).fetchall()
-        self.assertEqual(rows, [
-            ("again", None), ("again", None), ("keyed", "kimi:prompt:msg_1#0"), ("same", None), ("same", None),
-            ('{"path": "a"}', None), ("contents", None), ("steered", "kimi:steer:msg_2#0"),
-        ])
+        expected = [("user", None, "a task"), ("agent", None, "same"), ("tool_call", "Read", '{"path": "a"}'),
+                    ("tool_result", "Read", "contents"), ("user", None, "steered")]
+        self.assertEqual(self.texts(native), [*expected, ("user", None, "again")])
         for session in (f"{native}/agent-0", other):
-            self.assertEqual(self.texts(session), [("tool_call", "Read", '{"path": "a"}'),
-                                                   ("tool_result", "Read", "contents")])
+            self.assertEqual(self.texts(session), expected)
+        self.assertEqual(self.db().execute(
+            "SELECT count(*) FROM messages m JOIN sessions s ON s.id = m.session_id "
+            "WHERE s.adapter = 'kimi' AND m.key IS NOT NULL").fetchone(), (0,))
 
     def test_unknown_types_are_counted(self) -> None:
         self.session([
@@ -615,16 +616,25 @@ class KimiTest(InstalledCase):
         for n, text in enumerate([*notices, grep, *spills]):
             records += [Kimi.call("Read", {}, f"tool_{n}", 2), Kimi.result(f"tool_{n}", text, 2)]
         records.append(Kimi.reply(notices[0], 3))
-        records += [Kimi.call("Read", {}, "tool_img", 3), Kimi.result("tool_img", [
-            {"type": "text", "text": notices[0]}, {"type": "image_url", "image_url": {"url": "data:"}}], 3)]
+        image = {"type": "image_url", "image_url": {"url": "data:"}}
+        attached = [
+            [{"type": "text", "text": notices[0]}, image],
+            # Long enough to be clipped before it is completed.
+            [{"type": "text", "text": "x" * 40000}, image,
+             {"type": "text", "text": Kimi.spilled("", agent / "tool-results" / "Grep-tool_9.txt")}],
+            # Text that only names an attachment is not one.
+            Kimi.spilled("cut\n[image omitted]\ncut", agent / "tool-results" / "Grep-tool_9.txt"),
+        ]
+        for n, output in enumerate(attached):
+            records += [Kimi.call("Read", {}, f"tool_img{n}", 3), Kimi.result(f"tool_img{n}", output, 3)]
         self.session(records, native=native, title="Saved")
         self.hist("sync")
         results = [text for kind, _, text in self.texts(native) if kind == "tool_result"]
         self.assertEqual(results[:2], ["WHOLE-RESULT", "WHOLE-TASK-LOG"])
-        self.assertEqual(results[2:-1], [*notices[2:], grep, "WHOLE-GREP", spills[1], spills[2], "WHOLE-GREP",
+        self.assertEqual(results[2:-3], [*notices[2:], grep, "WHOLE-GREP", spills[1], spills[2], "WHOLE-GREP",
                                        "WHOLE-TASK-LOG"])
-        self.assertEqual(self.texts(native)[-3], ("agent", None, notices[0]))
-        self.assertEqual(results[-1], "WHOLE-RESULT\n[image omitted]")
+        self.assertEqual(self.texts(native)[-7], ("agent", None, notices[0]))
+        self.assertEqual(results[-3:], ["[image omitted]\nWHOLE-RESULT", "[image omitted]\nWHOLE-GREP", "WHOLE-GREP"])
         # A refresh completes only tool results too.
         before = self.texts(native)
         self.hist("refresh")

@@ -104,9 +104,10 @@ adapter's docstring in `hist/adapters/` describes its store.
   copied from its source and begins with a `forked from` event; a fork with no
   typed prompt is unclassified. Hook output, skill bodies, and skills the model
   loads are not stored; a slash command is stored as `/skill:<name> <args>` or
-  `/<plugin>:<command> <args>`, and a shell command the user runs is stored
-  with its output. Output too large for the journal is read from the agent's
-  `tool-results/` or `tasks/`.
+  `/<plugin>:<command> <args>`, a shell command the user runs is stored with
+  its output, and context imported into a session is an `import` event. Output
+  too large for the journal is read from the agent's `tool-results/` or
+  `tasks/`.
   Kimi rewrites a protocol 1.4 journal when it resumes that session, which
   stops the session's source: what was indexed stays, and its later messages
   are not indexed.

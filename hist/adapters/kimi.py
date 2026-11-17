@@ -87,10 +87,15 @@ _IGNORED = frozenset(
 _IGNORED_LOOP = frozenset({"step.begin"})
 # Prompt origins besides the user's own, and the kind each is indexed as.
 _ORIGINS = {"system_trigger": "event", "task": "event", "background_task": "event"}
+# A record's messages: kind, tool, text. None has a key: a fork's copies are the only records two
+# journals share, and the fork boundary skips them, while ids a provider or an SDK caller chooses
+# (a tool call's, a prompt's) are not unique across the store.
+Mapped = tuple[str, str | None, str]
 # Origins of a slash command: the user's when Kimi's trigger is user-slash.
 _SLASH = frozenset({"skill_activation", "plugin_command"})
 _MEDIA = {"image_url": IMAGE_OMITTED, "audio_url": "[audio omitted]", "video_url": "[video omitted]"}
 _ENDS = frozenset({"completed", "failed", "cancelled"})
+_IMPORTED = "<imported_context source="
 # The forms of a tool result whose output Kimi saved whole (renderPersistedToolResult
 # and renderAppendedSpillPointer): a header in place of the output, or a pointer
 # after its cut lines, then perhaps a tool's own lines, such as a task's id.
@@ -405,30 +410,37 @@ def _result_text(output: object) -> str:
         return output
     if not isinstance(output, list):
         return json.dumps(output, ensure_ascii=False)
+    # Media first, a line each: clipping keeps a text's head, and `complete`
+    # can tell attachments from text that only names one.
+    media: list[str] = []
     pieces: list[str] = []
     for part in output:
         kind = _name(part.get("type")) if isinstance(part, dict) else None
         if kind == "text":
             pieces.append(str(part.get("text", "")))
         elif kind in _MEDIA:
-            pieces.append(_MEDIA[kind])
+            media.append(_MEDIA[kind])
         else:
             pieces.append(json.dumps(part, ensure_ascii=False))
-    return "\n".join(pieces)
+    return "\n".join(media + pieces)
 
 
-def _shell(value: dict[str, Any]) -> list[tuple[str, str | None, str, str | None]]:
-    """A command the user ran from the prompt, or its output; any other
-    appended message mirrors a prompt or is the host's own reminder."""
+def _appended(value: dict[str, Any]) -> list[Mapped]:
+    """A message Kimi added to the context without a prompt: a command the user
+    ran from the prompt, its output, or context imported into the session
+    (buildImportContextMessage). Any other mirrors a prompt or is the host's own."""
 
     message = value.get("message") if isinstance(value.get("message"), dict) else {}
     origin = message.get("origin") if isinstance(message.get("origin"), dict) else {}
-    if origin.get("kind") != "shell_command" or not isinstance(message.get("content"), list):
-        return []
-    text = _unescape(_result_text(message["content"]))
-    if origin.get("phase") == "input":
-        return [("user", None, text, None)]
-    return [("tool_result", "bash", text, None)] if origin.get("phase") == "output" else []
+    content = message.get("content") if isinstance(message.get("content"), list) else []
+    if origin.get("kind") == "shell_command":
+        text = _unescape(_result_text(content))
+        if origin.get("phase") == "input":
+            return [("user", None, text)]
+        return [("tool_result", "bash", text)] if origin.get("phase") == "output" else []
+    imported = [part["text"] for part in content if isinstance(part, dict) and isinstance(part.get("text"), str)
+                and part["text"].startswith(_IMPORTED)]
+    return [("event", "import", text) for text in imported]
 
 
 def _unescape(text: str) -> str:
@@ -437,18 +449,12 @@ def _unescape(text: str) -> str:
     return text.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"').replace("&amp;", "&")
 
 
-def _key(prefix: str, value: object) -> str | None:
-    return f"kimi:{prefix}:{value}" if isinstance(value, str) and value else None
-
-
-def _prompt(value: dict[str, Any], state: dict[str, Any]) -> list[tuple[str, str | None, str, str | None]]:
+def _prompt(value: dict[str, Any], state: dict[str, Any]) -> list[Mapped]:
     origin = value.get("origin") if isinstance(value.get("origin"), dict) else {}
     kind = _name(origin.get("kind"))
-    steer = value.get("type") == "turn.steer"
-    key = _key("steer", value.get("messageId")) if steer else _key("prompt", value.get("promptId"))
     if kind == "user":
         text = _input_text(value.get("input"), origin, state)
-        return [("user", None, text, key)] if text else []
+        return [("user", None, text)] if text else []
     if kind in _SLASH:
         # Kimi's own rule for input a person sees as theirs (isVisibleWireTurnInput).
         if origin.get("trigger") != "user-slash":
@@ -457,7 +463,7 @@ def _prompt(value: dict[str, Any], state: dict[str, Any]) -> list[tuple[str, str
         if command is None:
             count_unknown(state, f"{kind} without a name")
             return []
-        return [("user", None, command, key)]
+        return [("user", None, command)]
     if kind not in _ORIGINS:
         count_unknown(state, f"origin:{kind}")
         return []
@@ -465,11 +471,11 @@ def _prompt(value: dict[str, Any], state: dict[str, Any]) -> list[tuple[str, str
     if not text:
         return []
     if kind == "system_trigger" and origin.get("name") == "subagent":
-        return [("work", "subagent", text, key)]
-    return [(_ORIGINS[kind], str(kind), text, key)]
+        return [("work", "subagent", text)]
+    return [(_ORIGINS[kind], str(kind), text)]
 
 
-def _loop(event: dict[str, Any], state: dict[str, Any]) -> list[tuple[str, str | None, str, str | None]]:
+def _loop(event: dict[str, Any], state: dict[str, Any]) -> list[Mapped]:
     calls: dict[str, str] = state.setdefault("calls", {})
     kind = _name(event.get("type"))
     if kind == "content.part":
@@ -477,7 +483,7 @@ def _loop(event: dict[str, Any], state: dict[str, Any]) -> list[tuple[str, str |
         part_kind = _name(part.get("type"))
         if part_kind == "text":
             text = str(part.get("text", ""))
-            return [("agent", None, text, _key("part", event.get("uuid")))] if text.strip() else []
+            return [("agent", None, text)] if text.strip() else []
         if part_kind != "think":
             count_unknown(state, f"content_part:{part_kind}")
         return []
@@ -488,24 +494,22 @@ def _loop(event: dict[str, Any], state: dict[str, Any]) -> list[tuple[str, str |
             calls[call] = name
             if len(calls) > 256:
                 calls.pop(next(iter(calls)))
-        # A model's provider names its calls, and Kimi keeps the names unique only within one
-        # conversation (createToolCallIdNormalizer), so a call keys nothing across the store.
-        return [("tool_call", name, json.dumps(event.get("args"), ensure_ascii=False), None)]
+        return [("tool_call", name, json.dumps(event.get("args"), ensure_ascii=False))]
     if kind == "tool.result":
         call = event.get("toolCallId")
         name = calls.pop(call, None) if isinstance(call, str) else None
         result = event.get("result") if isinstance(event.get("result"), dict) else {}
-        return [("tool_result", name, _result_text(result.get("output")), None)]
+        return [("tool_result", name, _result_text(result.get("output")))]
     if kind == "step.end":
         if event.get("finishReason") == "error":
-            return [("event", None, "the model step failed", None)]
+            return [("event", None, "the model step failed")]
         return []
     if kind not in _IGNORED_LOOP:
         count_unknown(state, f"loop:{kind}")
     return []
 
 
-def _record(value: dict[str, Any], state: dict[str, Any]) -> list[tuple[str, str | None, str, str | None]]:
+def _record(value: dict[str, Any], state: dict[str, Any]) -> list[Mapped]:
     record_type = _name(value.get("type"))
     if record_type in ("turn.prompt", "turn.steer"):
         return _prompt(value, state)
@@ -518,14 +522,14 @@ def _record(value: dict[str, Any], state: dict[str, Any]) -> list[tuple[str, str
         reason = value.get("reason")
         if reason == "failed":
             error = value.get("error") if isinstance(value.get("error"), dict) else {}
-            return [("event", None, f"turn failed: {error.get('message') or error.get('code') or 'error'}", None)]
+            return [("event", None, f"turn failed: {error.get('message') or error.get('code') or 'error'}")]
         if reason == "cancelled":
-            return [("event", None, "turn cancelled", None)]
+            return [("event", None, "turn cancelled")]
         return []
     if record_type == "full_compaction.complete":
-        return [("event", None, "context compacted", None)]
+        return [("event", None, "context compacted")]
     if record_type == "context.append_message":
-        return _shell(value)
+        return _appended(value)
     if record_type not in _IGNORED:
         count_unknown(state, f"type:{record_type}")
     return []
@@ -552,14 +556,14 @@ def map_records(
         time_ = state.get("time", EPOCH)
         turn = state.get("turn", time_)
         if record.index == skip_through:
-            found = [("event", None, f"forked from {state.get('forked_from')}", None)]
+            found = [("event", None, f"forked from {state.get('forked_from')}")]
         else:
             found = _record(value, state)
         part = 0
-        for kind, tool, text, key in found:
+        for kind, tool, text in found:
             if kind == "user":
                 turn = state["turn"] = time_
-            produced = parts(record.index, part, time_, turn, kind, tool, text, key)  # type: ignore[arg-type]
+            produced = parts(record.index, part, time_, turn, kind, tool, text, None)  # type: ignore[arg-type]
             messages.extend(produced)
             part += len(produced)
     return messages, state
@@ -572,6 +576,12 @@ def complete(transcript: Path, text: str) -> str | None:
     `tasks/` is read. Kimi writes either form once a call's output is whole;
     a background task's growing log is named only by a TaskOutput record."""
 
+    # A result's media lead its text (_result_text); the file holds only the text.
+    # Only a text-only output whose first line names an attachment reads as one.
+    media: list[str] = []
+    while text.partition("\n")[0] in _MEDIA.values() and "\n" in text:
+        line, _, text = text.partition("\n")
+        media.append(line)
     # Kimi's pointer is the last in the text and starts a line; an output
     # that only quotes a header still ends with its own pointer.
     start = text.rfind(_SPILL_MARK)
@@ -586,9 +596,7 @@ def complete(transcript: Path, text: str) -> str | None:
     if not any(saved.startswith(f"{agent}/{name}/") for name in ("tool-results", "tasks")):
         return None
     whole = read_saved(saved)
-    # The file holds only the text; media the result carried stay as their placeholders.
-    media = [line for line in text.split("\n") if line in _MEDIA.values()]
-    return None if whole is None else "\n".join([whole, *media])
+    return None if whole is None else "\n".join([*media, whole])
 
 
 def hook_input(payload: dict[str, Any], event: str) -> HookInput:
