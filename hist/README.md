@@ -66,8 +66,8 @@ transcript on the machine (32,483 sources, 35 GB, 2.75 million messages) took
 
 Command Code, OpenCode, Devin, and the Antigravity CLI have no start hook, so
 their sessions are indexed and searchable but are never shown the view or the
-worker header. Kimi Code has no start hook either; its prompt hook shows the
-view on a session's first prompt ([Install the hooks](#install-the-hooks-optional)). A subagent links to the session that started it on the same
+worker header. Kimi Code discards what a start hook prints; its prompt hook
+shows the view on a session's first prompt ([Install the hooks](#install-the-hooks-optional)). A subagent links to the session that started it on the same
 host; a worker started from another host's shell is linked only when its
 launcher writes a [marker line](#link-workers-by-a-marker-line). Each
 adapter's docstring in `hist/adapters/` describes its store.
@@ -290,7 +290,7 @@ copy of each changed file. Run it once per Codex home. To merge by hand:
 - Kimi Code (by hand only): append [`integrations/kimi.toml`](integrations/kimi.toml)
   to `~/.kimi-code/config.toml`, and to the `config.toml` of any other home
   that should get the view; a home without it still has its sessions indexed.
-  Kimi has no start hook, so this `UserPromptSubmit` hook prints the view, or a
+  Kimi discards what a start hook prints, so this `UserPromptSubmit` hook prints the view, or a
   worker's header, on a session's first prompt only: not on later prompts or
   steers, not after compaction, and not for a resumed session hist already
   indexed. A marker file per session under `$HIST_HOME/hook-state/kimi` records

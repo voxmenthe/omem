@@ -1,7 +1,8 @@
 # hist Kimi Code integration. Append to ~/.kimi-code/config.toml, and to the
 # config.toml of any other Kimi home that should get the view, beside the
-# hooks already there. Kimi has no start hook, so this one runs before every
-# prompt and prints the view, as plain text, on a session's first prompt only.
+# hooks already there. Kimi discards what a start hook prints, so this one runs
+# before every prompt and prints the view, as plain text, on a session's first
+# prompt only.
 
 [[hooks]]
 event = "UserPromptSubmit"

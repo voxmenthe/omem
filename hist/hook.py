@@ -1,5 +1,6 @@
 """`hist hook <host> <event>`: SessionStart and SubagentStart for Codex and
-Claude Code; UserPromptSubmit for Kimi Code, which has no start hook.
+Claude Code; UserPromptSubmit for Kimi Code, which runs a SessionStart hook
+but discards what it prints.
 
 The hook records a shell-launched worker's parent link and alarms for
 transcripts outside every source. In repositories listed in `view.inject`,
