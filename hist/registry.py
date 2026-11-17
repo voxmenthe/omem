@@ -52,13 +52,14 @@ def place_of(db: sqlite3.Connection, cwd: str | None, origin: str | None) -> Pla
     return None
 
 
-def lookup_directory(cwd: str) -> tuple[str | None, str | None, str | None]:
-    """(repo key, display, root) for a directory, or Nones outside a repository."""
+def lookup_directory(cwd: str, deadline: float | None = None) -> tuple[str | None, str | None, str | None]:
+    """(repo key, display, root) for a directory, or Nones outside a repository
+    or when Git has not answered by `deadline` (`time.monotonic`)."""
 
     path = Path(cwd)
     if not path.is_dir():
         return None, None, None
-    repo = current_repo(path)
+    repo = current_repo(path, deadline=deadline)
     if repo is None:
         return None, None, None
     return repo.key, repo.display, repo.root

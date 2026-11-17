@@ -5,7 +5,9 @@ One real session is indexed through `hist sync`, so the repository's identity,
 timeline, session, and source rows come from production code. The timeline is
 then extended in bulk with structurally valid synthetic sessions and messages.
 Search rows are omitted: the hook never searches. Each trial runs the real
-`hist hook claude SessionStart` command as a subprocess, as a host would.
+`hist hook claude SessionStart` command as a subprocess, as a host would,
+and `hist hook kimi UserPromptSubmit` twice for one new session: its first
+prompt, which builds the view, and a later prompt, which finds the marker.
 
 With --real-roots, the sources are this machine's Codex and Claude Code roots,
 so setup and normal view-command trials also pay real discovery. Hooks only
@@ -129,6 +131,7 @@ def _percentiles(values: list[float]) -> dict[str, float]:
 
 def _trials(home: Path, repo: Path, count: int) -> dict[str, object]:
     hook, view, sizes = [], [], set()
+    first_prompt, later_prompt = [], []
     for trial in range(count):
         payload = json.dumps({
             "session_id": f"6c000000-0000-4000-8000-{trial:012x}", "cwd": str(repo),
@@ -143,7 +146,18 @@ def _trials(home: Path, repo: Path, count: int) -> dict[str, object]:
         started = time.perf_counter()
         _hist(home, repo, "view")
         view.append(time.perf_counter() - started)
-    return {"hook_s": _percentiles(hook), "view_s": _percentiles(view), "view_bytes": sorted(sizes)}
+        prompt = json.dumps({
+            "session_id": f"session_6c000000-0000-4000-8000-{trial:012x}", "cwd": str(repo),
+            "prompt": "fix the guard", "is_steer": False, "session_title": "",
+        })
+        for times, wanted in ((first_prompt, True), (later_prompt, False)):
+            started = time.perf_counter()
+            out = _hist(home, repo, "hook", "kimi", "UserPromptSubmit", stdin=prompt).stdout
+            times.append(time.perf_counter() - started)
+            if out.startswith("<hist>\n") != wanted:
+                raise SystemExit(f"kimi {'first' if wanted else 'later'} prompt printed {out[:80]!r}")
+    return {"hook_s": _percentiles(hook), "view_s": _percentiles(view), "view_bytes": sorted(sizes),
+            "kimi_first_prompt_s": _percentiles(first_prompt), "kimi_later_prompt_s": _percentiles(later_prompt)}
 
 
 def main() -> int:

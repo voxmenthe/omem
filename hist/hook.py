@@ -1,4 +1,5 @@
-"""`hist hook <host> <event>`: SessionStart and SubagentStart.
+"""`hist hook <host> <event>`: SessionStart and SubagentStart for Codex and
+Claude Code; UserPromptSubmit for Kimi Code, which has no start hook.
 
 The hook records a shell-launched worker's parent link and alarms for
 transcripts outside every source. In repositories listed in `view.inject`,
@@ -6,27 +7,46 @@ it prints the indexed view for an interactive session or the short header
 for a worker, reading only the supplied session's metadata when its class is
 not indexed yet. Indexing and transcript verification belong to normal commands,
 not startup hooks. Any failure prints a warning on stderr and nothing on stdout.
+
+Kimi's hook runs before every prompt. A marker file under `HIST_HOME`, made
+before anything else is read, lets only a session's first prompt through:
+at most once, so a failed print loses that session's view and a retry cannot
+double it. Kimi exports no session variables, so a variable inherited from
+above Kimi would name the wrong session: the parent is the session that the
+process walk (`caller.direct_parent`) finds just above the Kimi process.
 """
 
 import json
 import os
 import sqlite3
 import sys
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
 from .adapters import HookInput, adapter
+from .caller import bounded, direct_parent
 from .commands import current_timeline, repository_identity, view, worker_header
 from .config import Config, load_config
 from .render import Timeline
 from .store import Store, StoreBusy, StoreError, utc_now
 from .sync import alarm
 
-EVENTS = frozenset({"SessionStart", "SubagentStart"})
-HOSTS = frozenset({"codex", "claude"})
+# Each host's hook events, and how it reads a hook's stdout: a JSON envelope,
+# or the context itself (Kimi would keep only a JSON reply's `message`).
+_STARTS = frozenset({"SessionStart", "SubagentStart"})
+HOSTS: dict[str, tuple[frozenset[str], str]] = {
+    "codex": (_STARTS, "json"),
+    "claude": (_STARTS, "json"),
+    "kimi": (frozenset({"UserPromptSubmit"}), "text"),
+}
 # Variables a host sets for commands it runs, naming the running session.
 _SESSION_VARIABLES = {"CODEX_THREAD_ID": "codex", "CLAUDE_CODE_SESSION_ID": "claude"}
 _NO_VIEW_STARTS = frozenset({"resume", "fork"})
+# What `ps`, `lsof`, and `git` may take of Kimi's hook timeout (3 s in
+# integrations/kimi.toml): the first prompt's marker is already taken, so a
+# killed hook loses the view.
+DEADLINE_SECONDS = 1.5
 
 
 def parent_from_environment(
@@ -70,10 +90,10 @@ def _owning_label(config: Config, path: Path) -> str | None:
     return None
 
 
-def _injects(config: Config, db: sqlite3.Connection, cwd: Path) -> bool:
+def _injects(config: Config, db: sqlite3.Connection, cwd: Path, deadline: float | None = None) -> bool:
     if config.inject == "all":
         return True
-    identity = repository_identity(db, cwd)
+    identity = repository_identity(db, cwd, deadline)
     names = {cwd.name, identity.rstrip("/").rsplit("/", 1)[-1]}
     row = db.execute("SELECT name FROM timelines WHERE identity = ?", (identity,)).fetchone()
     if row is not None:
@@ -108,6 +128,7 @@ def _context(
     found: HookInput,
     parent: tuple[str, str, str] | None,
     environment: Mapping[str, str],
+    deadline: float | None = None,
 ) -> str | None:
     with store.read() as db:
         row = _session(db, host, found.session_id)
@@ -138,14 +159,14 @@ def _context(
                 generation = int(db.execute("SELECT value FROM meta WHERE key = 'generation'").fetchone()[0])
                 timeline = Timeline(*found_row, generation=generation)
             else:
-                timeline = current_timeline(db, cwd)
+                timeline = current_timeline(db, cwd, deadline)
             if timeline is None:
                 return None
             return view(db, timeline, config.view_bytes)
         if config.worker_view == "none":
             return None
         if config.worker_view == "view":
-            timeline = current_timeline(db, cwd)
+            timeline = current_timeline(db, cwd, deadline)
             if timeline is not None:
                 return view(db, timeline, config.view_bytes)
         # A new worker is rarely indexed yet; the link just recorded still names its parent.
@@ -155,9 +176,64 @@ def _context(
         return worker_header(named)
 
 
+def _first_prompt(home: Path, session: str) -> bool:
+    """Claim a Kimi session's first prompt: true once per session and store."""
+
+    directory = home / "hook-state" / "kimi"
+    # Not parents=True: a missing HIST_HOME fails here rather than being made.
+    (home / "hook-state").mkdir(exist_ok=True)
+    directory.mkdir(exist_ok=True)
+    try:
+        os.close(os.open(directory / session, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    except FileExistsError:
+        return False
+    return True
+
+
+def _prompt(payload: dict[str, Any], environment: Mapping[str, str], home: Path) -> str | None:
+    """Kimi's UserPromptSubmit: the view or worker header, on a session's first prompt only."""
+
+    if payload.get("is_steer") is True:
+        return None
+    found = adapter("kimi").hook_input(payload, "UserPromptSubmit")
+    if not _first_prompt(home, found.session_id):
+        return None
+    config = load_config(home)
+    store = Store.open(home)
+    try:
+        deadline = time.monotonic() + DEADLINE_SECONDS
+        process, open_files = bounded(deadline)
+        caller = direct_parent(config.sources, "kimi", environ=environment, process=process,
+                               open_files=open_files)
+        parent = None if caller is None else (caller.adapter, caller.native_id, f"walk:{caller.rule}")
+        with store.write() as db:
+            if parent is not None:
+                db.execute(
+                    "INSERT OR IGNORE INTO links (child_adapter, child_native, parent_adapter, "
+                    "parent_native, via, recorded_at) VALUES ('kimi', ?, ?, ?, ?, ?)",
+                    (found.session_id, *parent, utc_now()),
+                )
+        with store.read() as db:
+            # A record of the journal indexed already: resumed, or older than the hook. Kimi's
+            # payload has no start source. hist's own start note (record -1) does not count:
+            # Kimi writes the first prompt only after this hook runs.
+            indexed = db.execute(
+                "SELECT 1 FROM messages m JOIN sessions s ON s.id = m.session_id "
+                "WHERE s.adapter = 'kimi' AND s.native_id = ? AND m.record >= 0 LIMIT 1",
+                (found.session_id,),
+            ).fetchone()
+            if indexed is not None or not _injects(config, db, found.cwd or Path.cwd(), deadline):
+                return None
+        return _context(store, config, "kimi", found, parent, environment, deadline)
+    finally:
+        store.close()
+
+
 def run(host: str, event: str, payload: dict[str, Any], environment: Mapping[str, str], home: Path) -> str | None:
     """The additional context to print, or None."""
 
+    if event == "UserPromptSubmit":
+        return _prompt(payload, environment, home)
     config = load_config(home)
     found = adapter(host).hook_input(payload, event)
     store = Store.open(home)
@@ -183,7 +259,8 @@ def run(host: str, event: str, payload: dict[str, Any], environment: Mapping[str
 
 
 def main(host: str, event: str, home: Path) -> int:
-    if host not in HOSTS or event not in EVENTS:
+    events, codec = HOSTS.get(host, (frozenset(), "json"))
+    if event not in events:
         print(f"hist hook: unsupported {host} {event}", file=sys.stderr)
         return 0
     try:
@@ -200,7 +277,7 @@ def main(host: str, event: str, home: Path) -> int:
         return 0
     if context:
         try:
-            print(json.dumps(
+            print(context if codec == "text" else json.dumps(
                 {"hookSpecificOutput": {"hookEventName": event, "additionalContext": context}},
                 ensure_ascii=False, separators=(",", ":"),
             ))

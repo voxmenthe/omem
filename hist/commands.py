@@ -115,19 +115,19 @@ def timeline_named(db: sqlite3.Connection, name: str, gen: int | None = None) ->
     return _timeline(db, row)
 
 
-def repository_identity(db: sqlite3.Connection, cwd: Path) -> str:
+def repository_identity(db: sqlite3.Connection, cwd: Path, deadline: float | None = None) -> str:
     """This directory's timeline identity, using the store's directory cache."""
 
     key = str(cwd)
     row = db.execute("SELECT repo_key FROM directories WHERE path = ?", (key,)).fetchone()
     if row is not None:
         return row[0] or f"path:{key}"
-    repo_key, _, _ = lookup_directory(key)
+    repo_key, _, _ = lookup_directory(key, deadline)
     return repo_key or f"path:{key}"
 
 
-def current_timeline(db: sqlite3.Connection, cwd: Path) -> Timeline | None:
-    identity = repository_identity(db, cwd)
+def current_timeline(db: sqlite3.Connection, cwd: Path, deadline: float | None = None) -> Timeline | None:
+    identity = repository_identity(db, cwd, deadline)
     row = db.execute(
         f"SELECT {_TIMELINE_COLUMNS} FROM timelines WHERE identity = ?", (identity,)
     ).fetchone()

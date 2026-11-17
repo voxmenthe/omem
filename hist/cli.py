@@ -45,7 +45,7 @@ USAGE = """hist: every agent session on this machine, indexed and navigable by r
                                           claude, codex, devin, opencode; anthropic, openai
                                           (APIs also take --base-url URL --key-env VAR;
                                           codex and openai take --effort E, default medium)
-  hist hook HOST EVENT                    SessionStart or SubagentStart hook
+  hist hook HOST EVENT                    start hook, or Kimi's UserPromptSubmit
   hist instructions                       agent instruction block for your instruction files
   hist backup PATH                        consistent copy of the store
 
@@ -120,8 +120,8 @@ def _parser() -> argparse.ArgumentParser:
     summarize.add_argument("--key-env", help="environment variable holding the API key")
     summarize.add_argument("--effort", help="reasoning effort (codex, openai); default medium")
     hook = sub.add_parser("hook", help="host hook entry point")
-    hook.add_argument("host", help="claude, codex, ...")
-    hook.add_argument("event", help="SessionStart or SubagentStart")
+    hook.add_argument("host", help="claude, codex, or kimi")
+    hook.add_argument("event", help="SessionStart or SubagentStart; UserPromptSubmit for kimi")
     sub.add_parser("instructions", help="agent instruction block for your instruction files")
     backup = sub.add_parser("backup", help="consistent copy of the store")
     backup.add_argument("path", help="new file to write")
