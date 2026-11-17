@@ -76,6 +76,8 @@ class Report:
     added: int = 0
     sources: int = 0
     pending: dict[str, int] = field(default_factory=dict)
+    # New sources whose adapter cannot classify them yet, per label.
+    waiting: dict[str, int] = field(default_factory=dict)
     stopped: list[str] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
@@ -85,6 +87,7 @@ class Report:
             "added": self.added,
             "sources": self.sources,
             "pending": self.pending,
+            "waiting": self.waiting,
             "stopped": self.stopped,
         }
 
@@ -213,6 +216,7 @@ class _Live:
 
     row: int
     adapter: str
+    native: str
     path: Path
     label: str
     session: int
@@ -242,6 +246,7 @@ def _load_live(row: tuple[Any, ...], candidate: _Candidate) -> _Live:
     live = _Live(
         row=source_id,
         adapter=adapter_name,
+        native=candidate.found.native_id,
         path=Path(candidate.found.path),
         label=label,
         session=session,
@@ -291,6 +296,9 @@ def _register(
             continue
         if head is not None:
             heads.append((candidate, head, None))
+        else:
+            label = candidate.source.label
+            report.waiting[label] = report.waiting.get(label, 0) + 1
     lookups: dict[str, tuple[str | None, str | None, str | None]] = {}
     with store.read() as db:
         for _, head, _ in heads:
@@ -500,13 +508,16 @@ def _stop_source(db: Any, row: int, name: str, reason: str) -> None:
 
 def _stop(store: Store, live: _Live, reason: str, report: Report) -> None:
     live.stopped = reason
-    name = f"{live.label}:{live.path.name}"
+    # The native id, not the file name: every Kimi journal is a wire.jsonl.
+    name = f"{live.label}:{live.native}"
     with store.write() as db:
         _stop_source(db, live.row, name, reason)
     report.stopped.append(name)
 
 
 def _completed(host: Any, path: Path, message: Message) -> Message:
+    if message.kind != "tool_result":
+        return message
     whole = host.complete(path, message.text)
     return message if whole is None else replace(message, text=whole)
 
@@ -794,15 +805,15 @@ def verify(store: Store, session: str | None = None, wait: float = LOCK_WAIT_SEC
             return report
         with store.read() as db:
             rows = db.execute(
-                "SELECT s.id, s.adapter, s.label, s.path, s.cursor FROM sources s "
+                "SELECT s.id, s.adapter, s.native_id, s.label, s.path, s.cursor FROM sources s "
                 "JOIN sessions x ON x.id = s.session_id WHERE s.state = 'active' "
                 "AND (? IS NULL OR x.alias = ?) ORDER BY s.id",
                 (session, session),
             ).fetchall()
-        for row, adapter_name, label, path, cursor_json in rows:
+        for row, adapter_name, native, label, path, cursor_json in rows:
             source_reader = adapter(adapter_name).reader
             cursor = source_reader.Cursor.from_json(json.loads(cursor_json)["reader"])
-            name = f"{label}:{Path(path).name}"
+            name = f"{label}:{native}"
             try:
                 source_reader.verify(Path(path), cursor)
             except reader.SourceMismatch as error:

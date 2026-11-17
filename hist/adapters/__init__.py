@@ -8,7 +8,9 @@ record shapes.
 """
 
 import json
+import os
 import re
+import stat
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +23,8 @@ SessionClass = Literal["interactive", "worker", "subagent", "maintenance", "uncl
 
 TOOL_OUTPUT_CHARS = 30_000
 IMAGE_OMITTED = "[image omitted]"
+# Larger saved outputs are read as a head and a tail, not whole.
+SAVED_READ_BYTES = 16 * 1024 * 1024
 
 
 class Expectation(Exception):
@@ -111,7 +115,7 @@ class Adapter(Protocol):
         self, records: list[Record], state: dict[str, Any]
     ) -> tuple[list[Message], dict[str, Any]]: ...
 
-    # Only hosts with a start hook (`hook.HOSTS`) define this.
+    # Only hosts with a hook (`hook.HOSTS`) define this.
     def hook_input(self, payload: dict[str, Any], event: str) -> HookInput: ...
 
     # Only hosts that record large outputs apart from the transcript define
@@ -183,6 +187,30 @@ def parts(
     ]
 
 
+def read_saved(path: str) -> str | None:
+    """A tool output a host saved beside its transcript, clipped as any tool
+    output is, or None unless `path` is a regular file."""
+
+    try:
+        # Non-blocking, so that a pipe planted there cannot stall the sync.
+        handle = open(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb")
+    except OSError:
+        return None
+    with handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        size = info.st_size
+        if size <= SAVED_READ_BYTES:
+            return clip_output(handle.read().decode("utf-8", "replace"))
+        half = TOOL_OUTPUT_CHARS // 2
+        head = handle.read(4 * half).decode("utf-8", "replace")[:half]
+        handle.seek(-4 * half, os.SEEK_END)
+        tail = handle.read().decode("utf-8", "replace")[-half:]
+    dropped = size - len(head.encode()) - len(tail.encode())
+    return f"{head}\n[... {dropped} bytes clipped ...]\n{tail}"
+
+
 # Only these can produce a lone surrogate: a `\uD800`-`\uDFFF` escape, or raw
 # surrogate bytes, which json.loads decodes with "surrogatepass".
 _SURROGATE_MARKS = {bytes: (b"\\ud", b"\\uD", b"\xed"), str: ("\\ud", "\\uD")}
@@ -220,7 +248,7 @@ def count_unknown(state: dict[str, Any], what: str) -> None:
 
 
 def adapter(name: str) -> Adapter:
-    from . import antigravity, claude, codex, commandcode, devin, opencode
+    from . import antigravity, claude, codex, commandcode, devin, kimi, opencode
 
     adapters: dict[str, Adapter] = {
         "antigravity": antigravity.ADAPTER,
@@ -228,6 +256,7 @@ def adapter(name: str) -> Adapter:
         "claude": claude.ADAPTER,
         "commandcode": commandcode.ADAPTER,
         "devin": devin.ADAPTER,
+        "kimi": kimi.ADAPTER,
         "opencode": opencode.ADAPTER,
     }
     return adapters[name]

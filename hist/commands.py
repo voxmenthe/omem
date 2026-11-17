@@ -794,6 +794,7 @@ def status(db: sqlite3.Connection, config: Config, home: Path) -> str:
         )
     out.append("sources:\n")
     pending = (last or {}).get("pending", {})
+    waiting = (last or {}).get("waiting", {})
     for source in config.sources:
         counts = dict(
             db.execute(
@@ -809,6 +810,8 @@ def status(db: sqlite3.Connection, config: Config, home: Path) -> str:
         )
         if pending.get(source.label):
             line += f"; {pending[source.label]} older sessions await backfill (`hist sync --all`)"
+        if waiting.get(source.label):
+            line += f"; {waiting[source.label]} not yet classified, retried each sync"
         if counts.get("skipped"):
             line += f"; {counts['skipped']} skipped"
         if counts.get("stopped"):

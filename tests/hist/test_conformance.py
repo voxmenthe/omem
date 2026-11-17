@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from tests.hist.fixtures import (
-    Antigravity, Claude, Codex, CommandCode, Devin, HistCase, OpenCode, protobuf, write_jsonl,
+    Antigravity, Claude, Codex, CommandCode, Devin, HistCase, Kimi, OpenCode, protobuf, write_jsonl,
 )
 
 BIG = "y" * 4000
@@ -104,10 +104,10 @@ class Conformance(HistCase):
         self.assertEqual([text for _, text in self.texts()], ["cut � here", "answer"])
 
     def test_a_failed_expectation_stops_only_its_source(self) -> None:
-        _, bad = self.write(1, [self.user(1, "before", 1), self.broken(1, 2), self.user(1, "after", 3)])
+        self.write(1, [self.user(1, "before", 1), self.broken(1, 2), self.user(1, "after", 3)])
         self.write(2, [self.user(2, "other session", 4)])
         result = self.hist("sync")
-        self.assertIn(f"stopped: {self.label}:{bad.name}", result.stdout)
+        self.assertIn(f"stopped: {self.label}:{self.native(1)}", result.stdout)
         status = self.hist("status").stdout
         self.assertIn("adapter expectation failed", status)
         texts = [text for _, text in self.texts()]
@@ -345,6 +345,49 @@ class AntigravityConformance(Conformance):
         self.write(1, [self.user(1, "cut \ud83d here", 1), self.reply(1, "answer", 2)])
         self.hist("sync")
         self.assertEqual([text for _, text in self.texts()], ["cut \ufffd\ufffd\ufffd here", "answer"])
+
+
+class KimiConformance(Conformance):
+    label = "kimi"
+
+    def native(self, number: int) -> str:
+        return f"session_00000000-0000-4000-8000-00000000c{number:03d}"
+
+    def transcript(self, number: int) -> tuple[str, Path]:
+        native, cwd = self.native(number), str(self.repo)
+        Kimi.write_state(self.kimi, cwd, native, title="Fix the guard")
+        return native[-8:], Kimi.journal(self.kimi, cwd, native)
+
+    def opening(self, number: int) -> list[dict[str, Any]]:
+        return [Kimi.metadata()]
+
+    def user(self, number: int, text: str, minute: int) -> dict[str, Any]:
+        return Kimi.prompt(text, minute)
+
+    def reply(self, number: int, text: str, minute: int) -> dict[str, Any]:
+        return Kimi.reply(text, minute)
+
+    def injected(self, number: int, minute: int) -> list[dict[str, Any]]:
+        skill = {"activationId": "a1", "skillName": "audit", "skillArgs": ""}
+        return [
+            Kimi.prompt([Kimi.text("<hook_result>INJECTED hook</hook_result>", source="user prompt submit hook")],
+                        minute),
+            # Older prompts carry a slash skill's body untagged, one part per activation.
+            Kimi.prompt([Kimi.text("INJECTED skill body")], minute,
+                        origin={"kind": "user", "skillActivations": [skill]}),
+            Kimi.prompt("INJECTED loaded skill", minute, steer=True,
+                        origin={"kind": "skill_activation", "skillName": "audit", "trigger": "model-tool"}),
+            {"type": "context.append_message", "message": {"role": "user", "content": "INJECTED reminder"}},
+            {"type": "agent.message.appended", "text": "INJECTED mirror", "time": 1},
+            Kimi.reply("INJECTED thinking", minute, kind="think"),
+        ]
+
+    def unknown(self, number: int, minute: int) -> dict[str, Any]:
+        return {"type": "future.record", "text": "UNKNOWN-TEXT", "time": 1}
+
+    def broken(self, number: int, minute: int) -> dict[str, Any]:
+        # Not a record the head reads, so the source stops while it is read.
+        return {"type": "context.append_loop_event", "event": "not an object", "time": 1}
 
 
 del Conformance

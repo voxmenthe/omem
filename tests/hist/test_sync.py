@@ -418,7 +418,7 @@ class ForksAndRewritesTest(HistCase):
         self.assertNotIn("stopped", self.hist("status").stdout)
         result = self.hist("verify", check=False)
         self.assertEqual(result.returncode, 1)
-        self.assertIn(f"stopped: codex:{path.name}", result.stdout)
+        self.assertIn(f"stopped: codex:{thread}", result.stdout)
         self.assertIn("consumed prefix changed", self.hist("status").stdout)
 
     def test_a_symlinked_transcript_is_reported_not_followed(self) -> None:

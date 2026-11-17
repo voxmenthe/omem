@@ -3,10 +3,12 @@
 Codex records model CLI 0.162 (paginated session_meta, content_item_kinds)
 and the pre-0.2 legacy layout; Claude Code records model 2.1.295; Command
 Code records model CLI 1.83 (format version 3); OpenCode tables model 2.0.31;
-Devin tables model CLI 3000.10; Antigravity steps model CLI 1.4. Text is
-synthetic; structure, field names, and injected-context markers are real.
+Devin tables model CLI 3000.10; Antigravity steps model CLI 1.4; Kimi Code
+records model 2.6.2 (journal protocols 1.4 and 1.5). Text is synthetic;
+structure, field names, and injected-context markers are real.
 """
 
+import hashlib
 import itertools
 import json
 import os
@@ -517,6 +519,116 @@ class Antigravity:
         return cls.step(132, minute, (140, protobuf((2, protobuf((1, text))))), tool=name)
 
 
+class Kimi:
+    """Kimi Code session files: `state.json` (version 2, or the versionless
+    layout with string times), agent journals, and the home's typed-prompt history."""
+
+    _ids = itertools.count(1)
+
+    @classmethod
+    def session_id(cls) -> str:
+        return f"session_00000000-0000-4000-8000-{next(cls._ids):012d}"
+
+    @staticmethod
+    def session_dir(home: Path, cwd: str, session: str) -> Path:
+        return home / "sessions" / f"wd_{Path(cwd).name}_3490c3fc3599" / session
+
+    @classmethod
+    def journal(cls, home: Path, cwd: str, session: str, agent: str = "main") -> Path:
+        return cls.session_dir(home, cwd, session) / "agents" / agent / "wire.jsonl"
+
+    @classmethod
+    def write_state(cls, home: Path, cwd: str, session: str, agents: dict[str, dict[str, Any]] | None = None,
+                    minute: int = 0, legacy: bool = False, **fields: Any) -> Path:
+        """`agents` maps each agent to its entry; a subagent's entry names its parent."""
+
+        agents = agents if agents is not None else {"main": {"type": "main"}}
+        if legacy:
+            state: dict[str, Any] = {"createdAt": stamp(minute), "updatedAt": stamp(minute),
+                                     "workDir": cwd, "agents": agents, "custom": {}}
+        else:
+            state = {"id": session, "version": 2, "cwd": cwd, "createdAt": epoch_ms(minute),
+                     "updatedAt": epoch_ms(minute), "archived": False, "agents": agents, "custom": {}}
+        state.update(fields)
+        path = cls.session_dir(home, cwd, session) / "state.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state))
+        return path
+
+    @staticmethod
+    def typed(home: Path, cwd: str, text: str) -> None:
+        path = home / "user-history" / f"{hashlib.md5(cwd.encode()).hexdigest()}.jsonl"
+        write_jsonl(path, [{"content": text}])
+
+    @staticmethod
+    def metadata(protocol: str = "1.5", minute: int = 0) -> dict[str, Any]:
+        return {"type": "metadata", "protocol_version": protocol, "created_at": epoch_ms(minute)}
+
+    @staticmethod
+    def text(text: str, **meta: Any) -> dict[str, Any]:
+        return {"type": "text", "text": text, **({"meta": meta} if meta else {})}
+
+    @classmethod
+    def prompt(cls, parts: str | list[dict[str, Any]], minute: int, origin: dict[str, Any] | None = None,
+               prompt_id: str | None = "", steer: bool = False) -> dict[str, Any]:
+        """A `turn.prompt` (or `turn.steer`); an empty `prompt_id` makes one up, None leaves it out."""
+
+        record: dict[str, Any] = {
+            "type": "turn.steer" if steer else "turn.prompt", "agentId": "main",
+            "input": [cls.text(parts)] if isinstance(parts, str) else parts,
+            "origin": origin or {"kind": "user"}, "turnId": 0, "time": epoch_ms(minute),
+        }
+        if prompt_id is not None:
+            record["messageId" if steer else "promptId"] = prompt_id or f"msg_{next(cls._ids):026d}"
+        return record
+
+    @classmethod
+    def loop(cls, event: dict[str, Any], minute: int) -> dict[str, Any]:
+        return {"type": "context.append_loop_event", "agentId": "main", "event": event, "time": epoch_ms(minute)}
+
+    @classmethod
+    def reply(cls, text: str, minute: int, uuid: str | None = "", kind: str = "text") -> dict[str, Any]:
+        event: dict[str, Any] = {"type": "content.part", "turnId": "0", "step": 1,
+                                 "part": {"type": kind, kind: text}}
+        if uuid is not None:
+            event["uuid"] = uuid or f"00000000-0000-4000-9000-{next(cls._ids):012d}"
+        return cls.loop(event, minute)
+
+    @classmethod
+    def call(cls, name: str, args: dict[str, Any], call_id: str, minute: int) -> dict[str, Any]:
+        return cls.loop({"type": "tool.call", "toolCallId": call_id, "name": name, "args": args}, minute)
+
+    @classmethod
+    def result(cls, call_id: str, output: Any, minute: int) -> dict[str, Any]:
+        return cls.loop({"type": "tool.result", "toolCallId": call_id, "result": {"output": output}}, minute)
+
+    @staticmethod
+    def ended(minute: int, reason: str = "completed", **fields: Any) -> dict[str, Any]:
+        return {"type": "turn.ended", "agentId": "main", "turnId": 0, "reason": reason, **fields,
+                "time": epoch_ms(minute)}
+
+    @staticmethod
+    def forked(agent: str, minute: int) -> dict[str, Any]:
+        return {"type": "forked", "agentId": agent, "time": epoch_ms(minute)}
+
+    @staticmethod
+    def saved_output(path: Path, preview: str) -> str:
+        """A tool result's text when Kimi saved the whole output apart."""
+
+        return (f"Tool output exceeded 50000 characters; the full output was saved to a file.\n"
+                f"tool_name: Read\ntool_call_id: tool_1\noutput_size_chars: 80841\noutput_size_bytes: 80841\n"
+                f"output_path: {path}\nnext_step: Use Read with output_path to page through the saved output, "
+                f"or Grep to search it.\n\n[preview: chars [0, {len(preview)})]\n{preview}")
+
+    @staticmethod
+    def spilled(shaped: str, path: Path) -> str:
+        """A tool result's text when Kimi cut its long lines and saved the whole output apart."""
+
+        return (f"{shaped}\n[Per-line truncation occurred; the complete output was saved to a file.\n"
+                f"output_path: {path}\nnext_step: Use Read with output_path to page through the saved "
+                f"output, or Grep to search it.]")
+
+
 def git_repo(path: Path, origin: str | None) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q", str(path)], check=True)
@@ -527,7 +639,8 @@ def git_repo(path: Path, origin: str | None) -> Path:
 
 class HistCase(unittest.TestCase):
     """A scratch machine: two Codex accounts, one root each for Claude Code,
-    Command Code, OpenCode, Devin, and Antigravity, and a hist home."""
+    Command Code, OpenCode, Devin, and Antigravity, Kimi Code's home and its
+    launchers' state root, and a hist home."""
 
     maxDiff = None
 
@@ -542,6 +655,8 @@ class HistCase(unittest.TestCase):
         self.opencode = self.base / ".local" / "share" / "opencode"
         self.devin = self.base / ".local" / "share" / "devin" / "cli"
         self.antigravity = self.base / ".gemini" / "antigravity-cli"
+        self.kimi = self.base / ".kimi-code"
+        self.kimi_state = self.base / ".kimi-code-state"
         for path in (self.codex, self.codex_state, self.codex2, self.claude, self.commandcode):
             path.mkdir(parents=True)
         self.home = self.base / "hist-home"
@@ -591,21 +706,34 @@ adapter = "antigravity"
 label = "antigravity"
 roots = ["{self.antigravity}"]
 
+[[sources]]
+adapter = "kimi"
+label = "kimi"
+roots = ["{self.kimi}", "{self.kimi_state}"]
+
 [view]
 inject = {inject}
 {extra}
 """
         )
 
-    def hist(self, *args: str, cwd: Path | None = None, stdin: str | None = None,
-             env: dict[str, str] | None = None, check: bool = True,
-             terminal: bool = False) -> subprocess.CompletedProcess[str]:
+    def environment(self, env: dict[str, str] | None = None) -> dict[str, str]:
+        """The runner's environment without its agent sessions, for this store."""
+
         environment = {
             key: value for key, value in os.environ.items()
             if not key.startswith(("CODEX_", "CLAUDE_CODE_", "HIST_"))
         }
         environment.update({"HIST_HOME": str(self.home), "PYTHONPATH": str(REPO_ROOT)})
         environment.update(env or {})
+        return environment
+
+    def hist(self, *args: str, cwd: Path | None = None, stdin: str | None = None,
+             env: dict[str, str] | None = None, check: bool = True,
+             terminal: bool = False, prefix: tuple[str, ...] = ()) -> subprocess.CompletedProcess[str]:
+        """`hist ARGS`; `prefix` is a command that runs it, such as a shell."""
+
+        environment = self.environment(env)
         # Never the runner's own terminal: `find` treats a terminal as a person.
         source: dict[str, Any] = {"input": stdin} if stdin is not None else {"stdin": subprocess.DEVNULL}
         if terminal:
@@ -614,7 +742,7 @@ inject = {inject}
             self.addCleanup(os.close, device)
             source = {"stdin": device}
         result = subprocess.run(
-            [sys.executable, "-m", "hist", *args], cwd=cwd or self.repo, **source,
+            [*prefix, sys.executable, "-m", "hist", *args], cwd=cwd or self.repo, **source,
             capture_output=True, text=True, env=environment, timeout=120,
         )
         if check and result.returncode != 0:

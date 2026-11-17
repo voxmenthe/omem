@@ -14,7 +14,6 @@ whole; `complete` reads that file.
 import json
 import os
 import re
-import stat
 from pathlib import Path
 from typing import Any, Callable
 
@@ -22,18 +21,17 @@ from .. import reader
 from ..reader import Cursor, Record, read as read_records
 from . import (
     IMAGE_OMITTED,
-    TOOL_OUTPUT_CHARS,
     Expectation,
     Found,
     Head,
     HookInput,
     Listing,
     Message,
-    clip_output,
     count_unknown,
     loads,
     normalize_time,
     parts,
+    read_saved,
 )
 
 NAME = "claude"
@@ -78,8 +76,6 @@ _TOOL_OUTPUT = ("<bash-stdout>", "<bash-stderr>")
 _INTERRUPTED = "[Request interrupted by user"
 _NOTIFICATION = "<task-notification>"
 _SAVED = re.compile(r"<persisted-output>\n[^\n]*Full output saved to: ([^\n]+)\n")
-# Larger saved outputs are read as a head and a tail, not whole.
-SAVED_READ_BYTES = 16 * 1024 * 1024
 
 
 def discover(roots: tuple[Path, ...], listing: Listing) -> list[Found]:
@@ -353,27 +349,6 @@ def _session_directory(transcript: Path) -> Path:
     return transcript.parent / transcript.stem
 
 
-def _read_saved(path: str) -> str | None:
-    try:
-        # Non-blocking, so that a pipe planted there cannot stall the sync.
-        handle = open(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb")
-    except OSError:
-        return None
-    with handle:
-        info = os.fstat(handle.fileno())
-        if not stat.S_ISREG(info.st_mode):
-            return None
-        size = info.st_size
-        if size <= SAVED_READ_BYTES:
-            return clip_output(handle.read().decode("utf-8", "replace"))
-        half = TOOL_OUTPUT_CHARS // 2
-        head = handle.read(4 * half).decode("utf-8", "replace")[:half]
-        handle.seek(-4 * half, os.SEEK_END)
-        tail = handle.read().decode("utf-8", "replace")[-half:]
-    dropped = size - len(head.encode()) - len(tail.encode())
-    return f"{head}\n[... {dropped} bytes clipped ...]\n{tail}"
-
-
 def complete(transcript: Path, text: str) -> str | None:
     """The whole output a saved-output preview stands for, clipped as any
     tool output is, or None. Only a regular file in the transcript's own
@@ -385,7 +360,7 @@ def complete(transcript: Path, text: str) -> str | None:
     allowed = os.path.realpath(_session_directory(transcript) / "tool-results")
     if not os.path.realpath(match.group(1).strip()).startswith(allowed + os.sep):
         return None
-    return _read_saved(match.group(1).strip())
+    return read_saved(match.group(1).strip())
 
 
 def hook_input(payload: dict[str, Any], event: str) -> HookInput:
