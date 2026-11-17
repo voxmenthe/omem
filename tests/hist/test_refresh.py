@@ -31,6 +31,9 @@ class RefreshTest(HistCase):
             Claude.user("u1", SESSION, cwd, "list it", 5),
             Claude.assistant("a1", SESSION, cwd, [Claude.tool_use("t1", "Bash", {"command": "ls"})], 6),
             Claude.user("r1", SESSION, cwd, [Claude.tool_result("t1", Claude.saved_output(self.saved, "PREVIEW"))], 7),
+            # The agent quotes the preview: only the tool result stands for the saved output.
+            Claude.assistant("a2", SESSION, cwd, [{"type": "text", "text": Claude.saved_output(self.saved, "QUOTED")}],
+                             8),
         ])
         self.hist("sync")
         self.saved.parent.mkdir(parents=True)
@@ -67,6 +70,7 @@ class RefreshTest(HistCase):
         self.assertFalse([text for text in texts if TOKEN in text])
         self.assertIn("the client secret is [redacted:google-oauth-secret] here", texts)
         self.assertIn("WHOLE-OUTPUT " * 10, texts)
+        self.assertIn(Claude.saved_output(self.saved, "QUOTED"), texts)
         self.assertEqual(db.execute("SELECT id, timeline_id, position FROM messages ORDER BY id").fetchall(),
                          positions)
         self.assertIn("Traceback (most recent call last)", self.hist("find", "Traceback").stdout)

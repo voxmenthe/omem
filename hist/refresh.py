@@ -144,7 +144,7 @@ def refresh(store: Store, dry_run: bool, progress: Callable[[str], None] = lambd
     while after < last:
         with store.read() as db:
             rows = db.execute(
-                "SELECT id, source_id, timeline_id, position, text FROM messages "
+                "SELECT id, source_id, timeline_id, position, kind, text FROM messages "
                 "WHERE id > ? AND id <= ? ORDER BY id LIMIT ?",
                 (after, last, READ_ROWS),
             ).fetchall()
@@ -153,10 +153,12 @@ def refresh(store: Store, dry_run: bool, progress: Callable[[str], None] = lambd
         after = rows[-1][0]
         report.scanned += len(rows)
         changes: list[tuple[int, str | None, str]] = []
-        for message_id, source_id, timeline_id, position, text in rows:
+        for message_id, source_id, timeline_id, position, kind, text in rows:
             host, path = sources[source_id]
-            whole = completes[host](path, text) if host in completes else None
-            if text.startswith("<persisted-output>") and whole is None:
+            # Only a tool's output stands for a saved one; a message may quote a preview.
+            output = kind == "tool_result"
+            whole = completes[host](path, text) if output and host in completes else None
+            if output and text.startswith("<persisted-output>") and whole is None:
                 report.outputs_kept += 1
             new = redact(text if whole is None else whole)
             if whole is not None:
