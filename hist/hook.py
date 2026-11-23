@@ -6,8 +6,11 @@ The hook records a shell-launched worker's parent link and alarms for
 transcripts outside every source. In repositories listed in `view.inject`,
 it prints the indexed view for an interactive session or the short header
 for a worker, reading only the supplied session's metadata when its class is
-not indexed yet. Indexing and transcript verification belong to normal commands,
-not startup hooks. Any failure prints a warning on stderr and nothing on stdout.
+not indexed yet. Hooks serve the indexed snapshot synchronously without
+scanning or verifying transcripts; after flushing stdout, valid SessionStart
+and Kimi UserPromptSubmit hooks start a debounced background
+`hist sync --catch-up` (at most once per `HOOK_CATCH_UP_COOLDOWN` seconds).
+Any failure prints a warning on stderr and nothing on stdout.
 
 Kimi's hook runs before every prompt. A marker file under `HIST_HOME`, made
 before anything else is read, lets only a session's first prompt through:
@@ -20,6 +23,7 @@ process walk (`caller.direct_parent`) finds just above the Kimi process.
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -30,7 +34,7 @@ from .caller import bounded, direct_parent
 from .commands import current_timeline, repository_identity, view, worker_header
 from .config import Config, load_config
 from .render import Timeline
-from .store import Store, StoreBusy, StoreError, utc_now
+from .store import DATABASE_NAME, Store, StoreBusy, StoreError, utc_now
 from .sync import alarm
 
 # Each host's hook events, and how it reads a hook's stdout: a JSON envelope,
@@ -48,6 +52,12 @@ _NO_VIEW_STARTS = frozenset({"resume", "fork"})
 # integrations/kimi.toml): the first prompt's marker is already taken, so a
 # killed hook loses the view.
 DEADLINE_SECONDS = 1.5
+# Debounce detached `hist sync --catch-up` spawns from hooks with a cheap stamp
+# file so hooks avoid SQLite overhead and subagent/prompt bursts.
+HOOK_CATCH_UP_COOLDOWN = 60.0
+_CATCH_UP_EVENTS = frozenset({"SessionStart", "UserPromptSubmit"})
+_CATCH_UP_STAMP = "catch-up.stamp"
+_CATCH_UP_ERR = "catch-up.err"
 
 
 def parent_from_environment(
@@ -194,9 +204,9 @@ def _first_prompt(home: Path, session: str) -> bool:
 def _prompt(payload: dict[str, Any], environment: Mapping[str, str], home: Path) -> str | None:
     """Kimi's UserPromptSubmit: the view or worker header, on a session's first prompt only."""
 
+    found = adapter("kimi").hook_input(payload, "UserPromptSubmit")
     if payload.get("is_steer") is True:
         return None
-    found = adapter("kimi").hook_input(payload, "UserPromptSubmit")
     if not _first_prompt(home, found.session_id):
         return None
     config = load_config(home)
@@ -207,8 +217,8 @@ def _prompt(payload: dict[str, Any], environment: Mapping[str, str], home: Path)
         caller = direct_parent(config.sources, "kimi", environ=environment, process=process,
                                open_files=open_files)
         parent = None if caller is None else (caller.adapter, caller.native_id, f"walk:{caller.rule}")
-        with store.write() as db:
-            if parent is not None:
+        if parent is not None:
+            with store.write() as db:
                 db.execute(
                     "INSERT OR IGNORE INTO links (child_adapter, child_native, parent_adapter, "
                     "parent_native, via, recorded_at) VALUES ('kimi', ?, ?, ?, ?, ?)",
@@ -240,16 +250,19 @@ def run(host: str, event: str, payload: dict[str, Any], environment: Mapping[str
     store = Store.open(home)
     try:
         parent = None if found.subagent else parent_from_environment(host, found.session_id, environment)
-        with store.write() as db:
-            if parent is not None:
-                db.execute(
-                    "INSERT OR IGNORE INTO links (child_adapter, child_native, parent_adapter, "
-                    "parent_native, via, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (host, found.session_id, parent[0], parent[1], parent[2], utc_now()),
-                )
-            if found.transcript is not None and _owning_label(config, found.transcript) is None:
-                alarm(db, "location", str(found.transcript),
-                      f"{host} hook named a transcript outside every configured source")
+        stray = found.transcript is not None and _owning_label(config, found.transcript) is None
+        if parent is not None or stray:
+            with store.write() as db:
+                if parent is not None:
+                    db.execute(
+                        "INSERT OR IGNORE INTO links (child_adapter, child_native, parent_adapter, "
+                        "parent_native, via, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (host, found.session_id, parent[0], parent[1], parent[2], utc_now()),
+                    )
+                if stray:
+                    assert found.transcript is not None
+                    alarm(db, "location", str(found.transcript),
+                          f"{host} hook named a transcript outside every configured source")
         with store.read() as db:
             injects = _injects(config, db, found.cwd or Path.cwd())
         if not injects or found.start in _NO_VIEW_STARTS:
@@ -257,6 +270,52 @@ def run(host: str, event: str, payload: dict[str, Any], environment: Mapping[str
         return _context(store, config, host, found, parent, environment)
     finally:
         store.close()
+
+
+def _maybe_catch_up(home: Path) -> bool:
+    """Start a detached `hist sync --catch-up` once per cooldown window.
+
+    Uses a cheap stamp file to debounce with zero SQLite overhead; `sync.lock`
+    remains the single mutex if two hooks race. Fails open without touching stdout.
+    """
+
+    if os.environ.get("HIST_NO_CATCH_UP") == "1":
+        return False
+    try:
+        if not (home / DATABASE_NAME).exists():
+            return False
+        stamp = home / _CATCH_UP_STAMP
+        try:
+            mtime = os.stat(stamp).st_mtime
+        except FileNotFoundError:
+            mtime = None
+        now = time.time()
+        # Allow a tiny negative skew for clock/filesystem rounding while healing
+        # larger backward clock jumps instead of suppressing catch-up indefinitely.
+        if mtime is not None and -1.0 <= now - mtime < HOOK_CATCH_UP_COOLDOWN:
+            return False
+        os.close(os.open(stamp, os.O_WRONLY | os.O_CREAT, 0o600))
+        os.utime(stamp, None)
+        env = dict(os.environ)
+        env["HIST_HOME"] = str(home)
+        with open(
+            home / _CATCH_UP_ERR,
+            "a",
+            encoding="utf-8",
+            opener=lambda path, flags: os.open(path, flags, 0o600),
+        ) as err:
+            subprocess.Popen(
+                [sys.executable, "-m", "hist", "sync", "--catch-up"],
+                cwd=home,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=err,
+                start_new_session=True,
+            )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+    return True
 
 
 def main(host: str, event: str, home: Path) -> int:
@@ -286,4 +345,6 @@ def main(host: str, event: str, home: Path) -> int:
             # The reader is gone. What is left in the buffer goes nowhere, so the
             # interpreter's own flush at exit cannot fail and exit with status 120.
             os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    if event in _CATCH_UP_EVENTS:
+        _maybe_catch_up(home)
     return 0

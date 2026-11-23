@@ -734,19 +734,27 @@ inject = {inject}
 """
         )
 
-    def environment(self, env: dict[str, str] | None = None) -> dict[str, str]:
+    def environment(self, env: dict[str, str | None] | None = None) -> dict[str, str]:
         """The runner's environment without its agent sessions, for this store."""
 
         environment = {
             key: value for key, value in os.environ.items()
             if not key.startswith(("CODEX_", "CLAUDE_CODE_", "HIST_"))
         }
-        environment.update({"HIST_HOME": str(self.home), "PYTHONPATH": str(REPO_ROOT)})
-        environment.update(env or {})
+        environment.update({
+            "HIST_HOME": str(self.home),
+            "HIST_NO_CATCH_UP": "1",
+            "PYTHONPATH": str(REPO_ROOT),
+        })
+        for key, value in (env or {}).items():
+            if value is None:
+                environment.pop(key, None)
+            else:
+                environment[key] = value
         return environment
 
     def hist(self, *args: str, cwd: Path | None = None, stdin: str | None = None,
-             env: dict[str, str] | None = None, check: bool = True,
+             env: dict[str, str | None] | None = None, check: bool = True,
              terminal: bool = False, prefix: tuple[str, ...] = ()) -> subprocess.CompletedProcess[str]:
         """`hist ARGS`; `prefix` is a command that runs it, such as a shell."""
 

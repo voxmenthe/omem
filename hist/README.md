@@ -16,10 +16,13 @@ hist sync --all && hist timelines
 
 Normal read commands sync for up to a second before reading; `hist sync`
 explicitly refreshes the index. When a read's second runs out, its first line
-says the index may be behind, and it starts one `hist sync` in the background
-to finish. That sync stops after a minute, does nothing if another sync is
-running, and writes its result to `~/.hist/catch-up.log`. Startup hooks use the
-existing index without syncing. `hist` with no arguments lists the commands.
+says the index may be behind, and it starts one `hist sync --catch-up` in the
+background to finish. That sync stops after a minute, exits cleanly without
+clobbering logs if another sync is running, writes its result to
+`~/.hist/catch-up.log`, and appends startup errors to `~/.hist/catch-up.err`.
+Startup hooks serve the existing index without scanning transcripts, then
+trigger the same background catch-up at most once a minute on `SessionStart`
+and Kimi `UserPromptSubmit`. `hist` with no arguments lists the commands.
 
 ## Ways to use
 
@@ -269,11 +272,17 @@ view's header carries the same invitation.
 Without hooks, every command still works and capture is complete. The hook
 adds the view at session start, compaction, and clear in repositories listed in
 `view.inject`, and records the parent of shell-launched workers. It serves the
-last indexed snapshot without scanning or verifying transcripts. Recent messages
-appear after a normal command such as `hist view` or an explicit `hist sync`;
-transcript integrity checks still run during indexing and `hist verify`. If no
-history is indexed for the repository yet, the hook prints nothing; run
-`hist sync` (or `hist sync --all` for pre-install history) to populate it.
+last indexed snapshot synchronously without scanning or verifying transcripts,
+and skips opening a SQLite write transaction when there is no parent link or
+outside-source alarm to record. After flushing stdout, valid `SessionStart`
+hooks and Kimi `UserPromptSubmit` hooks (never `SubagentStart`) start a
+detached `hist sync --catch-up` if the store exists, `HIST_NO_CATCH_UP` is not
+`1`, and `~/.hist/catch-up.stamp` is missing or at least 60 seconds old. Recent
+messages appear after that background catch-up, a normal command such as
+`hist view`, or an explicit `hist sync`; transcript integrity checks still run
+during indexing and `hist verify`. If no history is indexed for the repository
+yet, the hook prints nothing; run `hist sync` (or `hist sync --all` for
+pre-install history) to populate it.
 An unindexed Codex session can still be classified from its supplied transcript's
 metadata record, so standalone workers receive the worker header, not the
 interactive repository view; the hook does not resolve fork-parent history.
@@ -331,6 +340,59 @@ printf '{"session_id":"test","cwd":"%s","source":"startup"}' "$PWD" | hist hook 
 
 It prints one JSON object with the view once the repository has history, and
 nothing outside `view.inject`. Failures go to stderr and never block the host.
+
+## Periodic background sync on macOS (optional)
+
+Core `hist` stays OS-agnostic and needs no timer: reads sync first, and hooks
+start debounced catch-ups. On macOS, an optional `launchd` user agent keeps all
+configured sources—including hosts without hooks (Command Code, OpenCode,
+Devin, Antigravity CLI)—fresh and OS file caches warm across idle gaps.
+
+[`integrations/launchd.plist.example`](integrations/launchd.plist.example) runs
+`hist sync --catch-up` every 300 seconds (5 minutes) at low priority
+(`Nice` 10, `LowPriorityIO`, `ProcessType` `Background`), with `PATH` including
+`/opt/homebrew/bin` and `/usr/local/bin` so `zstd` (for compressed Codex
+archives) and `git` remain available under `launchd`'s minimal environment.
+`StartInterval` is best-effort: macOS skips ticks while the machine sleeps or
+when a previous run is still active, so it is not a hard wall-clock interval.
+
+Install it after `~/.hist` exists and `hist` is installed (confirm the binary
+path with `command -v hist`, and adjust `ProgramArguments` if it is not
+`$HOME/.local/bin/hist`):
+
+```bash
+mkdir -p ~/Library/LaunchAgents ~/.hist
+sed "s|/Users/YOU|$HOME|g" hist/integrations/launchd.plist.example \
+  > ~/Library/LaunchAgents/com.omem.hist-sync.plist
+plutil -lint ~/Library/LaunchAgents/com.omem.hist-sync.plist
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.omem.hist-sync.plist
+```
+
+Verify that it runs cleanly:
+
+```bash
+launchctl kickstart -k "gui/$(id -u)/com.omem.hist-sync"
+cat ~/.hist/catch-up.log
+cat ~/.hist/launchd.err      # should be empty
+hist status                  # check last_complete_sync advances and no new stopped sources
+```
+
+To tune the interval (for example, to `180` or `120` seconds), edit
+`StartInterval` in `~/Library/LaunchAgents/com.omem.hist-sync.plist` and reload
+it with `bootout` followed by `bootstrap`.
+
+**External-volume check:** If `hist` is installed editably from a checkout on
+an external volume (under `/Volumes/...`), macOS privacy controls may block a
+`launchd` user agent from importing files on that volume. Confirm
+`~/.hist/launchd.err` stays empty after loading; if macOS denies access, grant
+removable-volume access or install `hist` non-editably from the boot volume.
+
+Uninstall:
+
+```bash
+launchctl bootout "gui/$(id -u)/com.omem.hist-sync"
+rm ~/Library/LaunchAgents/com.omem.hist-sync.plist
+```
 
 ## Keep it healthy
 

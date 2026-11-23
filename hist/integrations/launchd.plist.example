@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Optional macOS launchd agent for periodic background hist sync catch-up.
+  Replace `/Users/YOU` with your home directory (and adjust the `hist` path if
+  `command -v hist` differs) before copying to:
+    ~/Library/LaunchAgents/com.omem.hist-sync.plist
+  See hist/README.md for launchctl bootstrap, verification, tuning, and uninstall.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.omem.hist-sync</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/.local/bin/hist</string>
+    <string>sync</string>
+    <string>--catch-up</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Include Homebrew so `zstd` (compressed Codex archives) and `git` stay on PATH. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <!-- Best-effort interval in seconds (300 = 5 min; tune to 180 or 120 if needed). -->
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <key>Nice</key>
+  <integer>10</integer>
+
+  <key>LowPriorityIO</key>
+  <true/>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>/dev/null</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/.hist/launchd.err</string>
+</dict>
+</plist>
