@@ -30,12 +30,13 @@ through `head` keeps it. Printed times are UTC and end in `Z`.
 ### Let the view orient each session
 
 In repositories listed in `view.inject`, the hook puts the history view at the
-top of every new session, and again after compaction or `/clear`. It uses the
-last indexed snapshot: the hook does not scan transcripts or refresh the index.
-Normal commands such as `hist view` refresh it; `hist sync` explicitly indexes
-pending transcripts. Until the repository has indexed history, the hook prints
-nothing. The agent zooms into what the current task needs. Elsewhere, `hist view`
-prints the view on demand, and `hist view myrepo` shows another repository's.
+top of every new session, and again after compaction or `/clear`. It serves the
+last indexed snapshot without blocking startup and starts a background catch-up
+sync at most once a minute; normal commands such as `hist view` sync before
+reading, and `hist sync` refreshes on demand. Until the repository has indexed
+history, the hook prints nothing. The agent zooms into what the current task
+needs. Elsewhere, `hist view` prints the view on demand, and `hist view myrepo`
+shows another repository's.
 
 ### Continue work across tools and accounts
 
@@ -106,9 +107,8 @@ line says so. `--include-self` searches them too, and `--session self` searches
 only them, as after compaction cost you a detail. A person at a terminal gets
 everything. A Claude Code subagent counts as its parent's session.
 
-Most searches take tens of milliseconds; a phrase ending in a one- or
-two-letter word, such as `"cam -p"`, can take seconds. When an error looks
-familiar, search for it before debugging from scratch.
+Searches usually take tens of milliseconds. When an error looks familiar,
+search for it before debugging from scratch.
 
 ### Delegate by reference
 

@@ -272,8 +272,9 @@ everything, and its last step connects your agents. Edit `roots` in
 default locations, for example a second `CODEX_HOME` for another account;
 `hist status` reports session stores that no source covers.
 [`hist/README.md`](hist/README.md) documents every configuration key, the hooks,
-linking workers to the sessions that started them, optional summaries, and
-maintenance. `hist` only reads transcripts and never changes OMem's stores.
+optional background sync (including a macOS `launchd` example), linking workers
+to the sessions that started them, optional summaries, and maintenance. `hist`
+only reads transcripts and never changes OMem's stores.
 
 ## Commands
 

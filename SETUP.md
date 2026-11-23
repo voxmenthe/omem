@@ -235,6 +235,10 @@ hist instructions                                 # the block to merge
   the history view in the repositories listed in `view.inject` in
   `~/.hist/config.toml`, and links shell-launched workers to the sessions that
   started them; see [hooks](hist/README.md#install-the-hooks-optional).
+- On macOS, you can optionally add a `launchd` agent for
+  [periodic background sync](hist/README.md#periodic-background-sync-on-macos-optional)
+  so every configured host, including hosts without hooks, stays fresh in the
+  background.
 
 ## Validate a development checkout
 
