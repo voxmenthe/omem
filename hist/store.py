@@ -12,6 +12,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
+from urllib.parse import quote
 
 SCHEMA_VERSION = 1
 # Rows this version writes follow text rules version 2: JSON escapes decoded
@@ -158,12 +159,20 @@ class StoreError(RuntimeError):
     """The store is damaged, from another version, or unusable."""
 
 
+class StoreMissing(StoreError):
+    """The store database does not exist."""
+
+
 class StoreBusy(RuntimeError):
     """Another process holds the write lock past the wait budget."""
 
 
 def utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _rw_uri(path: Path) -> str:
+    return f"file:{quote(os.path.abspath(path), safe='/')}?mode=rw"
 
 
 def _secure_directory(path: Path) -> None:
@@ -181,14 +190,30 @@ class Store:
         self.home = home
 
     @classmethod
-    def open(cls, home: Path) -> "Store":
-        _secure_directory(home)
+    def open(cls, home: Path, *, create: bool = True) -> "Store":
+        if home.is_symlink():
+            raise StoreError(f"refusing symlinked store directory: {home}")
+        if create:
+            _secure_directory(home)
+        elif home.exists() and not home.is_dir():
+            raise StoreError(f"store directory is not a directory: {home}")
         path = home / DATABASE_NAME
         if path.is_symlink():
             raise StoreError(f"refusing symlinked database: {path}")
-        connection = sqlite3.connect(path, isolation_level=None, timeout=0)
+        if create:
+            connection = sqlite3.connect(path, isolation_level=None, timeout=0)
+        else:
+            try:
+                connection = sqlite3.connect(_rw_uri(path), uri=True, isolation_level=None, timeout=0)
+            except sqlite3.OperationalError as error:
+                if not path.exists():
+                    raise StoreMissing(f"store does not exist: {path}") from error
+                raise StoreError(f"cannot open {path}: {error}") from error
+            except sqlite3.DatabaseError as error:
+                raise StoreError(f"cannot open {path}: {error}") from error
         try:
-            path.chmod(0o600)
+            if create:
+                path.chmod(0o600)
             connection.execute(f"PRAGMA busy_timeout = {WRITE_WAIT_MS}")
             connection.execute("PRAGMA journal_mode = WAL")
             # Commits wait for no disk flush; checkpoints flush the log. A power
@@ -202,6 +227,8 @@ class Store:
             if not connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE name = 'meta'"
             ).fetchone():
+                if not create:
+                    raise StoreError(f"store is not initialized: {path}")
                 store._create()
             store._check_version()
         except sqlite3.DatabaseError as error:

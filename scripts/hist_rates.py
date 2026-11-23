@@ -14,9 +14,12 @@ Each is counted per ISO week (Monday, UTC) of the shell call:
   head_cut   find calls piped to `head` whose output reached head's line
              limit; an upper bound on cut continuations
   grep       hist calls whose output is piped to grep or rg
-  bad_flag   hist calls rejected for an unknown or malformed argument
-  stale      hist calls whose output warned that the index may be behind
-  raw_grep   grep or rg over raw transcripts (Claude projects, Codex sessions)
+  bad_flag      hist calls rejected for an unknown or malformed argument
+  stale         hist calls whose output warned that the index may be behind
+  stale_budget  of those, the sync time budget ran out
+  stale_busy    of those, another process was syncing
+  stale%        stale calls as a percentage of all hist calls
+  raw_grep      grep or rg over raw transcripts (Claude projects, Codex sessions)
 
 A call is paired with its output by order: the k-th of a run of
 consecutive calls with the k-th output after the run. Hosts that run
@@ -34,12 +37,20 @@ import re
 import sqlite3
 from collections import Counter
 from pathlib import Path
+from urllib.parse import quote
 
 SHELL_TOOLS = (
     "Bash", "bash", "exec", "exec_command", "shell", "local_shell", "run_command", "execute",
     "run_shell_command", "shell_command",
 )
-COLUMNS = ("calls", "find", "hits", "self", "noted", "rerun", "head_cut", "grep", "bad_flag", "stale", "raw_grep")
+COLUMNS = (
+    "calls", "find", "hits", "self", "noted", "rerun", "head_cut", "grep", "bad_flag",
+    "stale", "stale_budget", "stale_busy", "raw_grep",
+)
+DISPLAY_COLUMNS = (
+    "calls", "find", "hits", "self", "noted", "rerun", "head_cut", "grep", "bad_flag",
+    "stale", "stale_budget", "stale_busy", "stale%", "raw_grep",
+)
 _HIST = re.compile(
     r"(?:^|[\s;&|(`\"'])hist\s+(find|view|zoom|sessions|read|timelines|status|sync|verify|refresh|build|backup)\b"
     r"([^\n;&|]*)((?:\|[^\n;&]*)*)"
@@ -110,6 +121,11 @@ def rates(db: sqlite3.Connection, since: str) -> dict[str, Counter[str]]:
             counts["bad_flag"] += 1
         if out.startswith("(index may be behind"):
             counts["stale"] += 1
+            banner = out.partition("\n")[0]
+            if "time budget ran out" in banner:
+                counts["stale_budget"] += 1
+            elif "another process is syncing" in banner:
+                counts["stale_busy"] += 1
         finds = [call for call in calls if call.group(1) == "find"]
         if not finds:
             continue
@@ -133,17 +149,28 @@ def rates(db: sqlite3.Connection, since: str) -> dict[str, Counter[str]]:
     return weeks
 
 
+def _format_cell(counts: Counter[str], name: str) -> str:
+    if name == "stale%":
+        calls = counts["calls"]
+        return f"{100 * counts['stale'] / calls:.1f}%" if calls else "-"
+    return str(counts[name])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--home", default=os.environ.get("HIST_HOME", "~/.hist"))
     parser.add_argument("--since", default="2026-09-01", help="first day counted (UTC)")
     args = parser.parse_args()
     path = Path(args.home).expanduser() / "hist.db"
-    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    db = sqlite3.connect(f"file:{quote(os.path.abspath(path), safe='/')}?mode=ro", uri=True)
     weeks = rates(db, args.since)
-    print("week        " + " ".join(f"{name:>8}" for name in COLUMNS))
+    widths = {name: max(8, len(name)) for name in DISPLAY_COLUMNS}
+    print("week        " + " ".join(f"{name:>{widths[name]}}" for name in DISPLAY_COLUMNS))
     for start in sorted(weeks):
-        print(f"{start}  " + " ".join(f"{weeks[start][name]:>8}" for name in COLUMNS))
+        print(
+            f"{start}  "
+            + " ".join(f"{_format_cell(weeks[start], name):>{widths[name]}}" for name in DISPLAY_COLUMNS)
+        )
 
 
 if __name__ == "__main__":

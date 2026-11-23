@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from stat import S_ISLNK
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from omem.layout import is_codex_native_memory_path
 
@@ -79,6 +79,8 @@ class Report:
     # New sources whose adapter cannot classify them yet, per label.
     waiting: dict[str, int] = field(default_factory=dict)
     stopped: list[str] = field(default_factory=list)
+    seconds: float = 0.0
+    discover_seconds: float = 0.0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -89,6 +91,8 @@ class Report:
             "pending": self.pending,
             "waiting": self.waiting,
             "stopped": self.stopped,
+            "seconds": round(self.seconds, 3),
+            "discover_seconds": round(self.discover_seconds, 3),
         }
 
 
@@ -223,6 +227,7 @@ class _Live:
     klass: str
     timeline: int
     token: str
+    mtime: float
     committed: str
     cursor: Any
     state0: dict[str, Any]
@@ -253,6 +258,7 @@ def _load_live(row: tuple[Any, ...], candidate: _Candidate) -> _Live:
         klass=klass,
         timeline=timeline,
         token=candidate.token,
+        mtime=candidate.mtime,
         committed=cursor_json,
         cursor=cursor,
         state0=state,
@@ -283,12 +289,16 @@ def _register(
     """Classify new sources and create their rows; skip what is never stored."""
 
     heads: list[tuple[_Candidate, Head | None, str | None]] = []
+    missing_deps: dict[str, str] = {}
     for candidate in new:
         if time.monotonic() >= deadline:
             report.complete = False
             break
         try:
             head = adapter(candidate.source.adapter).head(Path(candidate.found.path), locate)
+        except reader.MissingDependency as error:
+            missing_deps[error.dependency] = str(error)
+            continue
         except (Expectation, reader.UnsupportedFile) as error:
             heads.append((candidate, None, f"{type(error).__name__}: {error}"))
             continue
@@ -312,6 +322,8 @@ def _register(
         else:
             lookups[cwd] = lookup_directory(cwd)
     with store.write() as db:
+        for dep, detail in missing_deps.items():
+            alarm(db, "dependency", dep, detail)
         for cwd, found in lookups.items():
             remember_directory(db, cwd, found)
         for candidate, head, failure in heads:
@@ -525,11 +537,18 @@ def _completed(host: Any, path: Path, message: Message) -> Message:
 def _ingest(
     store: Store, group: list[_Live], deadline: float, report: Report, adapters: frozenset[str]
 ) -> None:
+    missing_deps: dict[str, str] = {}
     for live in group:
         try:
             live.cursor, live.verified = adapter(live.adapter).reader.check(live.path, live.cursor)
         except reader.SourceMismatch as error:
             _stop(store, live, f"transcript changed under its indexed prefix: {error}", report)
+        except reader.MissingDependency as error:
+            missing_deps[error.dependency] = str(error)
+            live.done = True
+            live.token = ""
+            live.messages.clear()
+            live.settled = True
         except reader.UnsupportedFile as error:
             _stop(store, live, str(error), report)
         except OSError:
@@ -553,6 +572,13 @@ def _ingest(
         except Expectation as error:
             _stop(store, live, f"adapter expectation failed: {error}", report)
             continue
+        except reader.MissingDependency as error:
+            missing_deps[error.dependency] = str(error)
+            live.done, live.token = True, ""
+            if not live.records:
+                live.messages.clear()
+                live.settled = True
+            continue
         except (OSError, reader.UnsupportedFile) as error:
             live.done, live.token = True, ""
             del error
@@ -568,6 +594,10 @@ def _ingest(
         if buffered >= COMMIT_BYTES:
             _commit(store, group, report, adapters)
             buffered = 0
+    if missing_deps:
+        with store.write() as db:
+            for dep, detail in missing_deps.items():
+                alarm(db, "dependency", dep, detail)
     _commit(store, group, report, adapters)
 
 
@@ -663,22 +693,38 @@ def sync(
     *,
     deadline: float,
     backfill: bool = False,
-    first: set[tuple[str, str]] | None = None,
     wait: float = LOCK_WAIT_SECONDS,
+    newest_first: bool | None = None,
+    after: Callable[[Report, Exception | None], None] | None = None,
 ) -> Report:
-    """Index new records; sessions in `first`, by (adapter, session id), go first."""
+    """Index new records under the sync lock."""
 
     report = Report()
+    use_newest_first = (
+        (deadline < float("inf") and not backfill) if newest_first is None else newest_first
+    )
     with _sync_lock(store.home, wait) as acquired:
         if not acquired:
             report.busy = True
             report.complete = False
             return report
+        error: Exception | None = None
         try:
-            _sync_locked(store, config, deadline, backfill, first or set(), report)
+            _sync_locked(store, config, deadline, backfill, use_newest_first, report)
         except (StoreBusy, StaleProgress):
             report.busy = True
             report.complete = False
+        except Exception as exc:
+            report.complete = False
+            error = exc
+            raise
+        finally:
+            if after is not None and not report.busy:
+                try:
+                    after(report, error)
+                except OSError:
+                    if error is None:
+                        raise
     return report
 
 
@@ -687,9 +733,10 @@ def _sync_locked(
     config: Config,
     deadline: float,
     backfill: bool,
-    first: set[tuple[str, str]],
+    newest_first: bool,
     report: Report,
 ) -> None:
+    started = time.monotonic()
     install = store.meta("install_time")
     with store.read() as db:
         # Older sources wait for a backfill; once one has finished, none wait.
@@ -713,7 +760,9 @@ def _sync_locked(
                 "json_object('time', ?, 'sessions', count(*)) FROM sources WHERE adapter = 'claude'",
                 (utc_now(),),
             )
+    discover_started = time.monotonic()
     found, alarms = _discover(config, listing, {k: v[4] for k, v in known.items()})
+    report.discover_seconds = round(time.monotonic() - discover_started, 3)
     install_epoch = calendar.timegm(time.strptime(install, "%Y-%m-%dT%H:%M:%SZ"))
     threads = {
         candidate.found.session_id: Path(candidate.found.path)
@@ -732,14 +781,9 @@ def _sync_locked(
             new.append(candidate)
         elif row[6] == "active" and (row[5] != candidate.token or row[4] != candidate.found.path):
             changed.append(candidate)
-    def later(candidate: _Candidate) -> bool:
-        return (candidate.source.adapter, candidate.found.session_id) not in first
-
-    new.sort(key=later)
     if new:
         _register(store, config, new, threads.get, deadline, report)
     groups: dict[int, list[_Live]] = {}
-    preferred: set[int] = set()
     with store.read() as db:
         for candidate in new + changed:
             row = db.execute(
@@ -751,19 +795,25 @@ def _sync_locked(
             if row is not None:
                 live = _load_live(row, candidate)
                 groups.setdefault(live.timeline, []).append(live)
-                if not later(candidate):
-                    preferred.add(live.timeline)
     report.sources = sum(len(group) for group in groups.values())
     adapters = frozenset(source.adapter for source in config.sources)
-    for timeline, group in sorted(
-        groups.items(),
-        key=lambda item: (item[0] not in preferred, min(s.frontier for s in item[1])),
-    ):
+    if newest_first:
+        ordered_groups = sorted(
+            groups.items(),
+            key=lambda item: (-max(s.mtime for s in item[1]), min(s.frontier for s in item[1]), item[0]),
+        )
+    else:
+        ordered_groups = sorted(
+            groups.items(),
+            key=lambda item: (min(s.frontier for s in item[1]), item[0]),
+        )
+    for timeline, group in ordered_groups:
         if time.monotonic() >= deadline:
             report.complete = False
             break
         _ingest(store, group, deadline, report, adapters)
     _resolve_links(store)
+    report.seconds = max(report.discover_seconds, round(time.monotonic() - started, 3))
     with store.write() as db:
         listing.save(db)
         for kind, subject, detail in alarms:
@@ -772,11 +822,10 @@ def _sync_locked(
             db.execute(
                 "INSERT OR IGNORE INTO meta (key, value) VALUES ('backfilled', ?)", (utc_now(),)
             )
-        if not first:
-            db.execute(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_sync', ?)",
-                (json.dumps({"time": utc_now(), **report.to_json()}),),
-            )
+        db.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_sync', ?)",
+            (json.dumps({"time": utc_now(), **report.to_json()}),),
+        )
         if report.complete:
             db.execute(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_complete_sync', ?)", (utc_now(),)
@@ -821,7 +870,7 @@ def verify(store: Store, session: str | None = None, wait: float = LOCK_WAIT_SEC
                     _stop_source(db, row, name, f"transcript changed under its indexed prefix: {error}")
                 report.stopped.append(name)
                 continue
-            except (OSError, reader.UnsupportedFile):
+            except (OSError, reader.UnsupportedFile, reader.MissingDependency):
                 report.missing += 1
                 continue
             with store.write() as db:

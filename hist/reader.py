@@ -31,7 +31,15 @@ class SourceMismatch(Exception):
 
 
 class UnsupportedFile(Exception):
-    """The file cannot be read here, e.g. zstd without the `zstd` command."""
+    """The file cannot be read by this reader."""
+
+
+class MissingDependency(RuntimeError):
+    """A required external tool (such as `zstd`) is not currently on PATH."""
+
+    def __init__(self, dependency: str, message: str) -> None:
+        super().__init__(message)
+        self.dependency = dependency
 
 
 @dataclass(frozen=True)
@@ -80,7 +88,7 @@ def _open_stream(path: Path) -> tuple[BinaryIO, subprocess.Popen[bytes] | None]:
         return path.open("rb"), None
     binary = shutil.which("zstd")
     if binary is None:
-        raise UnsupportedFile(f"{path}: zstd is not installed")
+        raise MissingDependency("zstd", f"{path}: zstd is not installed")
     process = subprocess.Popen(
         [binary, "-dcq", "--", str(path)],
         stdout=subprocess.PIPE,

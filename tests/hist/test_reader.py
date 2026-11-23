@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from hist import reader
-from hist.reader import Cursor, SourceMismatch, UnsupportedFile
+from hist.reader import Cursor, MissingDependency, SourceMismatch, UnsupportedFile
 
 
 class ReaderTest(unittest.TestCase):
@@ -120,12 +120,21 @@ class ReaderTest(unittest.TestCase):
         self.assertEqual(lines, [b"three"])
         self.assertEqual(end.records, 3)
 
-    def test_without_zstd_a_compressed_file_is_unsupported_not_skipped(self) -> None:
+    def test_without_zstd_a_compressed_file_raises_missing_dependency(self) -> None:
         compressed = self.dir / "t.jsonl.zst"
         compressed.write_bytes(b"\x28\xb5\x2f\xfd")
+        consumed = Cursor(records=1, offset=4, path=str(compressed))
         with mock.patch.object(shutil, "which", return_value=None):
-            with self.assertRaises(UnsupportedFile):
+            with self.assertRaises(MissingDependency) as read_err:
                 reader.read(compressed, Cursor())
+            self.assertNotIsInstance(read_err.exception, UnsupportedFile)
+            self.assertEqual(read_err.exception.dependency, "zstd")
+            with self.assertRaises(MissingDependency) as verify_err:
+                reader.verify(compressed, consumed)
+            self.assertNotIsInstance(verify_err.exception, UnsupportedFile)
+            with self.assertRaises(MissingDependency) as check_err:
+                reader.check(compressed, consumed)
+            self.assertNotIsInstance(check_err.exception, UnsupportedFile)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ from .caller import Caller, detect
 from .config import Config, ConfigError, hist_home, load_config
 from .hook import main as hook_main
 from .refresh import refresh
-from .store import DATABASE_NAME, Store, StoreBusy, StoreError, text_version
+from .store import Store, StoreBusy, StoreError, StoreMissing, text_version, utc_now
 from .summarize import BACKENDS
 from .summarize import main as summarize_main
 from .sync import Report, sync, verify
@@ -24,6 +24,8 @@ SYNC_SECONDS = 1.0
 # A read whose sync runs out of time starts one bounded sync in the background.
 CATCH_UP_SECONDS = 60.0
 CATCH_UP_LOG = "catch-up.log"
+CATCH_UP_ERR = "catch-up.err"
+CATCH_UP_ERR_MAX_BYTES = 256 * 1024
 USAGE = """hist: every agent session on this machine, indexed and navigable by reference.
 
   hist view [TIMELINE] [--bytes N]        orientation view; default: this repository
@@ -134,14 +136,86 @@ def _read_seconds() -> float:
     return float(os.environ.get("HIST_SYNC_SECONDS", SYNC_SECONDS))
 
 
-def _catch_up(home: Path) -> bool:
-    """Start `hist sync --catch-up` detached, its output in `CATCH_UP_LOG`."""
+def _trim_error_log(path: Path) -> None:
+    """Keep `catch-up.err` bounded when repeated failures accumulate."""
 
     try:
-        with open(home / CATCH_UP_LOG, "w", encoding="utf-8") as log:
+        size = path.stat().st_size
+    except OSError:
+        return
+    if size <= CATCH_UP_ERR_MAX_BYTES:
+        return
+    keep = CATCH_UP_ERR_MAX_BYTES // 2
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    try:
+        with path.open("rb") as src:
+            src.seek(max(0, size - keep))
+            tail = src.read()
+        newline = tail.find(b"\n")
+        if newline != -1:
+            tail = tail[newline + 1 :]
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as dst:
+            dst.write(tail)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _write_catch_up_log(home: Path, line: str) -> None:
+    """Atomically publish the one-line catch-up status; caller holds `sync.lock`."""
+
+    tmp = home / f"{CATCH_UP_LOG}.tmp.{os.getpid()}"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(line)
+        os.replace(tmp, home / CATCH_UP_LOG)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _sync_summary(report: Report, elapsed: float) -> str:
+    pending = sum(report.pending.values())
+    return (
+        f"indexed {report.added} messages from {report.sources} changed sources in {elapsed:.1f} s"
+        + (f"; {pending} older sessions await `hist sync --all`" if pending else "")
+        + (f"; stopped: {', '.join(report.stopped)}" if report.stopped else "")
+    )
+
+
+def _catch_up_line(report: Report, elapsed: float, error: Exception | None) -> str:
+    if error is not None:
+        detail = " ".join(str(error).split())
+        return f"{utc_now()} error: {type(error).__name__}: {detail}\n"
+    outcome = "complete" if report.complete else "partial (time budget)"
+    return f"{utc_now()} {outcome}: {_sync_summary(report, elapsed)}\n"
+
+
+def _catch_up(home: Path) -> bool:
+    """Start `hist sync --catch-up` detached; status goes to `CATCH_UP_LOG`,
+    stderr to `CATCH_UP_ERR`."""
+
+    err_path = home / CATCH_UP_ERR
+    _trim_error_log(err_path)
+    try:
+        fd = os.open(err_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "ab") as err:
             subprocess.Popen(
                 [sys.executable, "-m", "hist", "sync", "--catch-up"],
-                cwd=home, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
+                cwd=home,
+                env={**os.environ, "HIST_HOME": str(home)},
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=err,
+                start_new_session=True,
             )
     except OSError:
         return False
@@ -216,32 +290,51 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "instructions":
         sys.stdout.write(resources.files("hist").joinpath("INSTRUCTIONS.md").read_text(encoding="utf-8"))
         return 0
-    if args.command == "sync" and args.catch_up and not (home / DATABASE_NAME).exists():
-        # The store was removed after the read that started this catch-up.
-        return 0
     cwd = Path.cwd()
-    try:
-        config = load_config(home)
-        store = Store.open(home)
-    except (ConfigError, StoreError) as error:
-        print(f"hist: {error}", file=sys.stderr)
-        return 2
+    if args.command == "sync" and args.catch_up:
+        try:
+            store = Store.open(home, create=False)
+        except StoreMissing:
+            # The store was removed before or as this catch-up started.
+            return 0
+        except StoreError as error:
+            print(f"hist: {error}", file=sys.stderr)
+            return 2
+        try:
+            config = load_config(home)
+        except ConfigError as error:
+            store.close()
+            print(f"hist: {error}", file=sys.stderr)
+            return 2
+    else:
+        try:
+            config = load_config(home)
+            store = Store.open(home)
+        except (ConfigError, StoreError) as error:
+            print(f"hist: {error}", file=sys.stderr)
+            return 2
     try:
         if args.command == "sync":
             started = time.monotonic()
-            # A catch-up tries the lock once, so at most one runs, and it stops in time.
-            deadline, wait = (started + CATCH_UP_SECONDS, 0.0) if args.catch_up else (float("inf"), 5.0)
-            report = sync(store, config, deadline=deadline, backfill=args.all, wait=wait)
+            if args.catch_up:
+                def publish(done: Report, error: Exception | None) -> None:
+                    _write_catch_up_log(home, _catch_up_line(done, time.monotonic() - started, error))
+
+                sync(
+                    store,
+                    config,
+                    deadline=started + CATCH_UP_SECONDS,
+                    backfill=args.all,
+                    wait=0.0,
+                    newest_first=False,
+                    after=publish,
+                )
+                return 0
+            report = sync(store, config, deadline=float("inf"), backfill=args.all, wait=5.0)
             if report.busy:
                 print("hist: another process is syncing; try again", file=sys.stderr)
                 return 1
-            pending = sum(report.pending.values())
-            print(
-                f"indexed {report.added} messages from {report.sources} changed sources in "
-                f"{time.monotonic() - started:.1f} s"
-                + (f"; {pending} older sessions await `hist sync --all`" if pending else "")
-                + (f"; stopped: {', '.join(report.stopped)}" if report.stopped else "")
-            )
+            print(_sync_summary(report, time.monotonic() - started))
             return 0
         if args.command == "verify":
             started = time.monotonic()
@@ -272,7 +365,13 @@ def main(argv: list[str] | None = None) -> int:
             target.chmod(0o600)
             print(f"backed up to {target}")
             return 0
-        report = sync(store, config, deadline=time.monotonic() + _read_seconds())
+        read_budget = _read_seconds()
+        report = sync(
+            store,
+            config,
+            deadline=time.monotonic() + read_budget,
+            wait=max(0.0, min(0.5, read_budget / 2)),
+        )
         catching_up = not report.complete and not report.busy and _catch_up(home)
         prefix = _staleness(report, store, catching_up)
         if args.command == "status":
