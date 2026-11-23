@@ -61,6 +61,15 @@ class PagingTest(HistCase):
     def test_find_pages_cover_every_hit_once_newest_first(self) -> None:
         pages = self.walk("find", "needle", limit=LIST_BYTES)
         self.assertGreater(len(pages), 1)
+        # Every `hist find` page including header and `more:` footer stays within LIST_BYTES.
+        args: tuple[str, ...] = ("find", "needle")
+        while True:
+            out = self.hist(*args).stdout
+            self.assertLessEqual(len(out.encode("utf-8")), LIST_BYTES, args)
+            more = CONTINUATION.search(out.splitlines()[-1]) if out.splitlines() else None
+            if more is None:
+                break
+            args = tuple(shlex.split(more.group(1)))
         for n, page in enumerate(pages):
             # The first line counts the page's hits and, but on the last page,
             # repeats the continuation, so `| head` cannot cut it off.
@@ -277,3 +286,52 @@ class SlashCommandPreviewTest(HistCase):
         self.assertEqual(header, "1 hit, newest first")
         self.assertIn("<command-name>/intent</command-name>", hit)
         self.assertIn('~ user: "/intent foo"', outline)
+
+
+class StatusTimingTest(HistCase):
+    """`hist status` displays optional `seconds` and `discover_seconds` from `last_sync`."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.hist("status")
+
+    def _set_last_sync(self, payload: dict[str, object]) -> None:
+        db = self.db()
+        with db:
+            db.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_sync', ?)",
+                (json.dumps(payload),),
+            )
+
+    def _status_text(self) -> str:
+        from hist.config import load_config
+
+        return commands.status(self.db(), load_config(self.home), self.home)
+
+    def test_status_renders_timing_when_present_and_stays_backward_compatible(self) -> None:
+        base = {"time": "2026-11-23T12:00:00Z", "complete": True, "busy": False, "added": 7}
+
+        self._set_last_sync({**base, "seconds": 0.342, "discover_seconds": 0.281})
+        out = self._status_text()
+        self.assertIn(
+            "index: last sync 2026-11-23T12:00:00Z (complete, 7 messages added, 0.34 s total, 0.28 s discover);",
+            out,
+        )
+
+        # Zero floats are rendered, not dropped as falsy.
+        self._set_last_sync({**base, "added": 0, "seconds": 0.0, "discover_seconds": 0.0})
+        out = self._status_text()
+        self.assertIn("(complete, 0 messages added, 0.00 s total, 0.00 s discover);", out)
+
+        # Backward compatibility when timing keys are absent (older stores).
+        self._set_last_sync(base)
+        out = self._status_text()
+        self.assertIn("index: last sync 2026-11-23T12:00:00Z (complete, 7 messages added);", out)
+        self.assertNotIn("total", out)
+        self.assertNotIn("discover", out)
+
+        # Partial timing (e.g. busy sync with only total seconds).
+        self._set_last_sync({**base, "complete": False, "busy": True, "added": 0, "seconds": 0.204, "discover_seconds": None})
+        out = self._status_text()
+        self.assertIn("(busy, 0 messages added, 0.20 s total);", out)
+        self.assertNotIn("discover", out)

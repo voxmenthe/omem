@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,7 +25,13 @@ LIST_ROWS = 40
 SESSION_LINE_BYTES = 320
 FIND_HITS = 10
 FIND_SCAN = 2000
+# Drop open 1–2-char trailing FTS5 tokens (benchmark winner over 1-char-only on live snapshot).
+_SHORT_TAIL_MAX = 2
+_BOUND_SESSIONS_MAX = 64
 MAX_DEPTH = 3
+_TOKEN = re.compile(r"[^\W_]+", flags=re.UNICODE)
+# Unicode categories that SQLite FTS5 unicode61 unconditionally treats as separators.
+_GAP_SEPARATORS = frozenset({"Cc", "Zs", "Zl", "Zp", "Pc", "Pi", "Pf", "Sm"})
 _REF = re.compile(
     r"(?:(?P<name>[A-Za-z][A-Za-z0-9._-]*)(?:~(?P<generation>\d+))?:)?"
     r"(?P<start>\d+)(?:\+(?P<size>\d+))?"
@@ -272,11 +279,31 @@ def zoom_message(db: sqlite3.Connection, timeline: Timeline, position: int, page
     return out
 
 
-def _find_pattern(text: str) -> tuple[str, re.Pattern[str]]:
-    tokens = re.findall(r"\w+", text, flags=re.UNICODE)
-    if not tokens or all(len(token) < 3 for token in tokens):
+def _is_ascii_separator(ch: str) -> bool:
+    return ch.isascii() and not ch.isalnum()
+
+
+def _is_fts_separator(ch: str) -> bool:
+    return _is_ascii_separator(ch) or unicodedata.category(ch) in _GAP_SEPARATORS
+
+
+def _find_pattern(text: str, *, short_tail_max: int | None = None) -> tuple[str, re.Pattern[str]]:
+    matches = list(_TOKEN.finditer(text))
+    tokens = [match.group() for match in matches]
+    if not tokens or all(len(word) < 3 for word in re.findall(r"\w+", text, flags=re.UNICODE)):
         raise UsageError("search text needs a word of at least three characters")
-    query = '"' + " ".join(tokens) + '"*'
+    tail_max = _SHORT_TAIL_MAX if short_tail_max is None else short_tail_max
+    if _is_ascii_separator(text[-1]):
+        query = '"' + " ".join(tokens) + '"'
+    elif (
+        len(tokens) >= 2
+        and len(tokens[-1]) <= tail_max
+        and any(len(token) >= 3 for token in tokens[:-1])
+        and any(_is_fts_separator(ch) for ch in text[matches[-2].end() : matches[-1].start()])
+    ):
+        query = '"' + " ".join(tokens[:-1]) + '"'
+    else:
+        query = '"' + " ".join(tokens) + '"*'
     anchor = r"(?<![^\W_])" if text[:1].isalnum() else ""
     return query, re.compile(anchor + re.escape(text), re.IGNORECASE)
 
@@ -417,6 +444,39 @@ def _header(hits: int, scanned: bool, more: str | None) -> str:
     return line + (f"; more: {more}" if more else "") + "\n"
 
 
+def _timeline_bounds(db: sqlite3.Connection, timeline_id: int) -> tuple[int, int] | None:
+    first = db.execute(
+        "SELECT id FROM messages WHERE timeline_id = ? ORDER BY position ASC LIMIT 1",
+        (timeline_id,),
+    ).fetchone()
+    if first is None:
+        return None
+    last = db.execute(
+        "SELECT id FROM messages WHERE timeline_id = ? ORDER BY position DESC LIMIT 1",
+        (timeline_id,),
+    ).fetchone()
+    return first[0], last[0]
+
+
+def _sessions_bounds(db: sqlite3.Connection, sessions: tuple[int, ...]) -> tuple[int, int] | None:
+    lo: int | None = None
+    hi: int | None = None
+    for session_id in sessions:
+        first = db.execute(
+            "SELECT id FROM messages WHERE session_id = ? ORDER BY position ASC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if first is None:
+            continue
+        last = db.execute(
+            "SELECT id FROM messages WHERE session_id = ? ORDER BY position DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        lo = first[0] if lo is None else min(lo, first[0])
+        hi = last[0] if hi is None else max(hi, last[0])
+    return None if lo is None or hi is None else (lo, hi)
+
+
 def find(
     db: sqlite3.Connection,
     text: str,
@@ -431,8 +491,32 @@ def find(
     """
 
     query, pattern = _find_pattern(text)
-    clauses = ["search MATCH ?", "search.rowid < ?"]
-    params: list[object] = [query, after if after is not None else (1 << 62)]
+    note = filters.note + "\n" if filters.note else ""
+    lo: int | None = None
+    upper = 1 << 62 if after is None else after
+    if timeline is not None:
+        bounds = _timeline_bounds(db, timeline.id)
+        if bounds is None:
+            return "no matches\n" + note
+        lo, hi = bounds
+        upper = min(upper, hi + 1)
+    if filters.sessions is not None and len(filters.sessions) <= _BOUND_SESSIONS_MAX:
+        bounds = _sessions_bounds(db, filters.sessions)
+        if bounds is None:
+            return "no matches\n" + note
+        s_lo, s_hi = bounds
+        lo = s_lo if lo is None else max(lo, s_lo)
+        upper = min(upper, s_hi + 1)
+    if lo is not None and lo >= upper:
+        return "no matches\n" + note
+
+    clauses = ["search MATCH ?"]
+    params: list[object] = [query]
+    if lo is not None:
+        clauses.append("search.rowid >= ?")
+        params.append(lo)
+    clauses.append("search.rowid < ?")
+    params.append(upper)
     if timeline is not None:
         clauses.append("m.timeline_id = ?")
         params.append(timeline.id)
@@ -453,56 +537,69 @@ def find(
     if filters.until is not None:
         clauses.append("m.time < ?")
         params.append(filters.until)
-    candidates = db.execute(
-        "SELECT m.id, m.timeline_id, m.position, m.text, x.alias, x.label, m.kind, m.tool "
-        "FROM search JOIN messages m ON m.id = search.rowid JOIN sessions x ON x.id = m.session_id "
-        f"WHERE {' AND '.join(clauses)} ORDER BY search.rowid DESC LIMIT ?",
-        [*params, FIND_SCAN],
-    ).fetchall()
 
-    def command(upper: int) -> str:
-        return f"hist find {_quote(text)}{_scope(timeline)}{filters.flags} --after {upper}"
+    def command(cursor_upper: int) -> str:
+        return f"hist find {_quote(text)}{_scope(timeline)}{filters.flags} --after {cursor_upper}"
 
-    note = filters.note + "\n" if filters.note else ""
-    budget = LIST_BYTES - len(note.encode()) - len(_header(FIND_HITS, True, command(1 << 62)).encode())
+    worst_more = command(1 << 62)
+    overhead = (
+        len(note.encode())
+        + len(_header(FIND_HITS, True, worst_more).encode())
+        + len(f"more: {worst_more}\n".encode())
+    )
+    budget = max(0, LIST_BYTES - overhead)
     timelines: dict[int, Timeline] = {}
     out: list[str] = []
     used = 0
     hits = 0
-    more = None
-    for message_id, timeline_id, position, body, alias, label, kind, tool in candidates:
-        shown = search_text(body)
-        match = pattern.search(shown)
-        if match is None:
-            continue
-        if timeline_id not in timelines:
-            row = db.execute(
-                f"SELECT {_TIMELINE_COLUMNS} FROM timelines WHERE id = ?", (timeline_id,)
-            ).fetchone()
-            timelines[timeline_id] = _timeline(db, row)
-        found_in = timelines[timeline_id]
-        window = flat(shown[max(0, match.start() - 80) : match.start() + 160])
-        snippet = clip_line(f"[s:{alias} {label}] {kind_label(kind, tool)}: …{window}…", LINE_BYTES)
-        entry = f"{found_in.ref_name}:{position}+1|{snippet}\n"
-        level = 5
-        while level > 0 and ((position >> level) + 1 << level) > found_in.length:
-            level -= 1
-        if level > 0:
-            ancestor = node_at((position >> level) << level, 1 << level)
-            entry += "  in " + Renderer(db, found_in).line(ancestor)
-        size = len(entry.encode())
-        if used + size > budget and hits:
-            more = command(message_id + 1)
-            break
-        out.append(entry)
-        used += size
-        hits += 1
-        if hits == FIND_HITS:
-            more = command(message_id)
-            break
-    scanned = more is None and len(candidates) == FIND_SCAN
+    more: str | None = None
+    scanned_rows = 0
+    last_scanned_id: int | None = None
+    cursor = db.execute(
+        "SELECT m.id, m.timeline_id, m.position, m.text, x.alias, x.label, m.kind, m.tool "
+        "FROM search JOIN messages m ON m.id = search.rowid JOIN sessions x ON x.id = m.session_id "
+        f"WHERE {' AND '.join(clauses)} ORDER BY search.rowid DESC LIMIT ?",
+        [*params, FIND_SCAN],
+    )
+    try:
+        for message_id, timeline_id, position, body, alias, label, kind, tool in cursor:
+            scanned_rows += 1
+            last_scanned_id = message_id
+            shown = search_text(body)
+            match = pattern.search(shown)
+            if match is None:
+                continue
+            if timeline_id not in timelines:
+                row = db.execute(
+                    f"SELECT {_TIMELINE_COLUMNS} FROM timelines WHERE id = ?", (timeline_id,)
+                ).fetchone()
+                timelines[timeline_id] = _timeline(db, row)
+            found_in = timelines[timeline_id]
+            window = flat(shown[max(0, match.start() - 80) : match.start() + 160])
+            snippet = clip_line(f"[s:{alias} {label}] {kind_label(kind, tool)}: …{window}…", LINE_BYTES)
+            entry = f"{found_in.ref_name}:{position}+1|{snippet}\n"
+            level = 5
+            while level > 0 and ((position >> level) + 1 << level) > found_in.length:
+                level -= 1
+            if level > 0:
+                ancestor = node_at((position >> level) << level, 1 << level)
+                entry += "  in " + Renderer(db, found_in).line(ancestor)
+            size = len(entry.encode())
+            if used + size > budget and hits:
+                more = command(message_id + 1)
+                break
+            out.append(entry)
+            used += size
+            hits += 1
+            if hits == FIND_HITS:
+                more = command(message_id)
+                break
+    finally:
+        cursor.close()
+    scanned = more is None and scanned_rows == FIND_SCAN
     if scanned:
-        more = command(candidates[-1][0])
+        assert last_scanned_id is not None
+        more = command(last_scanned_id)
     return _header(hits, scanned, more) + note + "".join(out) + (f"more: {more}\n" if more else "")
 
 
@@ -782,8 +879,14 @@ def status(db: sqlite3.Connection, config: Config, home: Path) -> str:
     else:
         state = "complete" if last["complete"] else "busy" if last["busy"] else "partial (time budget)"
         complete = meta.get("last_complete_sync", "not recorded")
+        timing_parts: list[str] = []
+        if last.get("seconds") is not None:
+            timing_parts.append(f"{last['seconds']:.2f} s total")
+        if last.get("discover_seconds") is not None:
+            timing_parts.append(f"{last['discover_seconds']:.2f} s discover")
+        timing = f", {', '.join(timing_parts)}" if timing_parts else ""
         out.append(
-            f"index: last sync {last['time']} ({state}, {last['added']} messages added); "
+            f"index: last sync {last['time']} ({state}, {last['added']} messages added{timing}); "
             f"last complete sync {complete}\n"
         )
     version = int(meta.get("text_version", "1"))
