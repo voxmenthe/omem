@@ -6,6 +6,7 @@ __pycache__/
 /dist/
 /.pytest_cache/
 /.coverage
+/.learning-workspace/
 /REFERENCE-REPOS/
 /PLANS/
 /PAPERS/
